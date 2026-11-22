@@ -54,7 +54,9 @@ export async function request(url, settings = {}) {
   });
   if (!res.ok) {
     const info = await res.json().catch(() => ({}));
-    throw Error(info.error || `Request failed (${res.status}).`);
+    const failure = Error(info.error || `Request failed (${res.status}).`);
+    failure.status = res.status;
+    throw failure;
   }
   return res;
 }

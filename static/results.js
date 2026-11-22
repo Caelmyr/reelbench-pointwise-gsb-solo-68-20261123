@@ -1,4 +1,4 @@
-import {badge, btn, e, img, link, n, percent, plot, stat, table, date, dots} from "./widgets.js";
+import {badge, btn, e, icon, img, link, n, percent, plot, stat, table, date, dots, numField, areaField} from "./widgets.js";
 
 const colors = ["#58836b","#b26a4a","#818d40","#786f99"];
 const layers = {overlay:"Measurement map",source:"Source plane",paired:"Paired plane",reference:"Reference image"};
@@ -150,6 +150,57 @@ function filmResultDetail(kind, m) {
   return `${information[kind]()}<p class="plot-note">${e(m.note)}</p>`;
 }
 
+const takeStates={
+  head:["Head scan","#58836b"],tail:["Tail scan","#786f99"],blend:["Handoff blend","#9a8555"],unobserved:["Unobserved · no scan image","#c9c2b4"],
+};
+
+function provStrip(segments,total){
+  return `<div class="prov-strip">${segments.map(seg=>{
+    const width=100*(seg.last_sample-seg.first_sample+1)/total;
+    const tip=`${takeStates[seg.state][0]} · film ${n(seg.first_mm,1)}–${n(seg.last_mm,1)} mm · ${n(seg.first_s,3)}–${n(seg.last_s,3)} s${seg.readable?"":" · not readable film"}`;
+    return `<div class="prov prov-${seg.state}" style="width:${width.toFixed(2)}%" title="${e(tip)}"></div>`;
+  }).join("")}</div>`;
+}
+
+function excerptCard(ex){
+  const unobs=ex.unobserved_spans>0;
+  return `<div class="excerpt"><div class="title-row"><div><strong>${n(ex.start_s,3)} – ${n(ex.end_s,3)} s</strong><br>
+    <small>${e(date(ex.created_at))} · ${n(ex.audio.samples,0)} samples from take sample ${n(ex.take_first_sample,0)}</small></div>
+    ${unobs?badge("Contains no-evidence silence","caution"):badge("Fully observed","ready")}</div>
+    <audio controls preload="metadata" src="/api/excerpts/${ex.id}/audio.wav"></audio>
+    ${provStrip(ex.segments,ex.audio.samples)}
+    ${unobs?`<p class="notice">${e(ex.reading_note)}</p>`:""}
+    ${ex.note?`<p class="soft">${e(ex.note)}</p>`:""}
+    <div class="actions">${link("WAV",`/api/excerpts/${ex.id}/audio.wav`,"tiny secondary","download")}${link("Manifest JSON",`/api/excerpts/${ex.id}`,"tiny secondary","book")}</div></div>`;
+}
+
+function takeSection(record,recording){
+  const take=recording?.take;
+  if(!take) return `<h3>Adopted sample track</h3><p class="soft">No adopted recording is stored on this diagnostic yet. Render one from two registered scans of the same leader; only one adopted take is kept.</p>
+    <div class="actions">${btn("Render adopted sample","take-render","primary","sample")}</div>`;
+  const tb=take.timebase,sw=take.switch,excerpts=recording?.excerpts||[];
+  return `<h3>Adopted sample track</h3>
+    <audio controls preload="metadata" src="/api/takes/${take.id}/audio.wav"></audio>
+    <div class="metrics">${stat("Duration",`${n(take.stats.duration_s,3)} s`)}${stat("Sample rate",`${n(take.audio.sample_rate,0)} Hz`)}
+      ${stat("Handoff at",`${n(sw.film_mm,1)} mm film`)}${stat("Unobserved",percent(take.stats.unobserved_percent))}
+      ${stat("Sprocket spots excluded",n(take.stats.hole_spots_excluded,0))}</div>
+    ${provStrip(take.segments,take.audio.samples)}
+    <div class="swatches">${Object.entries(takeStates).map(([key,[label,color]])=>dots(label,color)).join(" ")}</div>
+    <p class="plot-note">${e(sw.rationale)}</p><p class="plot-note">${e(take.note)}</p>
+    <details><summary>Perforation timebase stored with this take</summary>
+      ${table(["Anchor","X px","Film mm","Seen on"],tb.anchors.map((a,index)=>[index+1,n(a.x_px,1),n(a.film_mm,2),a.scans.join(" + ")]))}
+      <p class="plot-note">Pitch ${n(tb.pitch_mm,3)} mm · ${n(tb.mm_per_sample,5)} mm per sample · ${n(tb.speed_mm_s,1)} mm/s · origin at the first shared perforation.</p></details>
+    <details><summary>Scan sources</summary>${table(["Pass","Capture","Original digest"],[
+      ["Head",take.head.display_name,take.head.original_digest],["Tail",take.tail.display_name,take.tail.original_digest]])}</details>
+    <h4>Cut an excerpt for restoration</h4>
+    <form id="excerpt-form" class="form-stack"><div class="form-columns">
+      ${numField("Start (s)","start_s",0,0,take.stats.duration_s,0.001)}
+      ${numField("End (s)","end_s",(Math.floor(take.stats.duration_s*1000)/1000).toFixed(3),0,take.stats.duration_s,0.001)}</div>
+      ${areaField("Note for the restoration desk","note","",500)}
+      <div><button class="button primary" type="submit">${icon("measure")}Cut excerpt</button></div></form>
+    ${excerpts.length?`<h4>Saved excerpts</h4><div class="stack">${excerpts.map(excerptCard).join("")}</div>`:""}`;
+}
+
 function details(record) {
   if (["perforation","gate","sound","density","transport"].includes(record.kind)) return filmResultDetail(record.kind,record.metrics);
   const render = {
@@ -166,7 +217,7 @@ function details(record) {
   return render(record.kind==="defects" ? record : record.metrics);
 }
 
-export function resultCard(record, layer, currentRevision) {
+export function resultCard(record, layer, currentRevision, recording) {
   const path=`/api/results/${record.id}`;
   const available = ["overlay","source",...(record.pictures.paired ? ["paired"] : []),...(record.metrics.reference_image ? ["reference"] : [])];
   const old = record.source_version !== currentRevision;
@@ -177,6 +228,7 @@ export function resultCard(record, layer, currentRevision) {
     ${layer==="overlay"?legend(record):""}
     ${metricSet(record)}
     <section>${details(record)}</section>
+    ${record.kind==="sound"?takeSection(record,recording):""}
     <details><summary>Measurement source</summary>${table(["Property","Value"],[
       ["Image",record.provenance.photo.display_name],["Image role",record.provenance.photo.role],["Region",record.provenance.region?.name || "Entire plane"],
       ["Photo digest",record.provenance.photo.original_digest],

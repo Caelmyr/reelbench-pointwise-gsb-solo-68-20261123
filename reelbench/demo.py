@@ -5,8 +5,8 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-from .geometry import DEFAULT_CORNERS, canvas_dimensions, homography
-from .photos import linear_to_srgb, png_bytes, srgb_to_linear
+from .geometry import DEFAULT_CORNERS, MIN_SUPPORT_ALPHA, canvas_dimensions, homography
+from .photos import linear_to_srgb, png_bytes, srgb_to_linear, uint8_image
 from .store import make_id
 from .photos import store_capture
 
@@ -43,6 +43,26 @@ SERIES = (
     DemoSpecimen(391, "Parade route · R06", "Acetate", "Neutral print", "Flatbed A", "Reel 06",
                 ((24, 29, 27), (94, 104, 91), (185, 191, 178))),
 )
+
+LEADER = DemoSpecimen(519, "Festival leader · R21", "Acetate", "Neutral print", "Flatbed B", "Reel 21",
+                      ((36, 33, 30), (112, 106, 97), (198, 192, 181)))
+LEADER_KEY = "reelbench.training.leader.v1"
+LEADER_POSES = {
+    "head": [[0.094, 0.088], [0.909, 0.111], [0.896, 0.909], [0.083, 0.892]],
+    "tail": [[0.103, 0.096], [0.904, 0.085], [0.917, 0.903], [0.096, 0.914]],
+}
+
+
+def soft_band(x, low, high, edge):
+    return np.clip((x - low) / edge + .5, 0, 1) * np.clip((high - x) / edge + .5, 0, 1)
+
+
+def leader_coverage(key):
+    def coverage(u, v):
+        if key == "head":
+            return soft_band(u, .030, .615, .016)
+        return soft_band(u, .448, .984, .016) * (1 - soft_band(u, .755, .789, .005))
+    return coverage
 
 
 def random_field(generator, size, y_space, x_space):
@@ -83,7 +103,7 @@ def rounded_hole(x, y, center, lane, width, height):
     return np.hypot(np.maximum(dx, 0), np.maximum(dy, 0)) + np.minimum(np.maximum(dx,dy),0) < radius
 
 
-def bake_field(specimen):
+def bake_field(specimen, hole_cy=.774, hole_wobble=.006):
     width, height = PLANE_SIZE
     generator = np.random.default_rng(specimen.seed)
     yr, xr = np.indices((height,width), dtype=np.float32)
@@ -97,12 +117,12 @@ def bake_field(specimen):
     color[~carrier] = [.045,.049,.048]
     count=16
     for step,cx in enumerate(np.linspace(.061,.939,count)):
-        for lane, cy in enumerate((.21,.774)):
+        for lane, cy in enumerate((.21,hole_cy)):
             if lane==0 and step==6:
                 continue
             width_jitter = .0145*(1 + .09*np.sin(step*2.1 + lane))
             height_jitter = .051*(1+.08*np.cos(step+lane))
-            hole = rounded_hole(x,y,cx+.002*np.sin(step*.7),cy+.006*np.sin(11*cx),width_jitter,height_jitter)
+            hole = rounded_hole(x,y,cx+.002*np.sin(step*.7),cy+hole_wobble*np.sin(11*cx),width_jitter,height_jitter)
             color[hole & carrier] = [.795,.795,.755] + (.013*grain[hole & carrier,None])
     stops = [.12,.5,.91]
     palette=srgb_to_linear(np.array(specimen.colors,dtype=np.float32)/255)
@@ -178,7 +198,7 @@ def capture_alpha(x, y):
     return np.clip(.5-(round_edge+inner-.021)*410,0,1)
 
 
-def warp_to_photo(array, corners, photo_size, seed):
+def warp_to_photo(array, corners, photo_size, seed, coverage=None):
     width, height = photo_size
     photo_to_tile = np.linalg.inv(homography(DEFAULT_CORNERS, corners))
     photo_y, photo_x = np.indices((height, width), dtype=np.float32)
@@ -194,20 +214,24 @@ def warp_to_photo(array, corners, photo_size, seed):
         axis=2,
     )
     alpha = capture_alpha(tile_u, tile_v)
+    if coverage is not None:
+        alpha = alpha * coverage(tile_u, tile_v)
     shadow = ndimage.shift(ndimage.gaussian_filter(alpha, 7), (9, 5), order=1, mode="constant")
     stage = desk_background(width, height, seed)
     stage *= (1 - 0.61 * shadow)[:, :, None]
     rim = np.clip(alpha - ndimage.minimum_filter(alpha, size=8), 0, 1)
     tile_image *= 1 - 0.24 * rim[:, :, None]
     mixed = stage * (1 - alpha[:, :, None]) + tile_image * alpha[:, :, None]
-    return linear_to_srgb(mixed)
+    return linear_to_srgb(mixed), alpha
 
 
-def render_photo(field, role, specimen):
+def render_photo(field, role, specimen, corners=None, coverage=None):
     linear = light_field(field, role)
-    image = warp_to_photo(linear, POSES[role], PHOTO_SIZE, specimen.seed)
-    array = np.rint(np.clip(image, 0, 1) * 255).astype(np.uint8)
-    return Image.fromarray(array)
+    image, alpha = warp_to_photo(linear, corners or POSES[role], PHOTO_SIZE, specimen.seed, coverage)
+    if coverage is None:
+        array = np.rint(np.clip(image, 0, 1) * 255).astype(np.uint8)
+        return Image.fromarray(array)
+    return uint8_image(np.clip(image, 0, 1), alpha)
 
 
 def rectangle(name, purpose, left, top, right, bottom):
@@ -263,12 +287,69 @@ def training_specimen(store, specimen):
     }
 
 
+def leader_specimen(store):
+    field = bake_field(LEADER, hole_cy=.742, hole_wobble=.002)
+    photos = []
+    notes = {
+        "head": "First pass of the leader; clean at the start, stops before the tail.",
+        "tail": "Second pass of the leader; reaches the end, skips one band.",
+    }
+    for key in ("head", "tail"):
+        image = render_photo(field, "diffuse", LEADER, LEADER_POSES[key], leader_coverage(key))
+        photos.append(store_capture(
+            store.blobs, png_bytes(image), "diffuse",
+            f"festival-leader-r21-scan-{key}.png", notes[key], make_id(), synthetic=True,
+        ))
+    base, other = photos
+    size = canvas_dimensions(base, LEADER_POSES["head"], 152, 87.1)
+    samples = np.linspace(0, 1, 400)
+    uu, vv = np.meshgrid(samples, samples)
+    tail_support = float(np.mean(capture_alpha(uu, vv) * leader_coverage("tail")(uu, vv) >= MIN_SUPPORT_ALPHA))
+    return {
+        "name": LEADER.name,
+        "batch": LEADER.batch,
+        "body": LEADER.body,
+        "glaze": LEADER.glaze,
+        "firing": LEADER.firing,
+        "notes": "Synthetic leader scanned twice. Both passes share the same perforations and variable-area "
+                 "track; the first pass is clean at the head, the second reaches the tail, and one short band "
+                 "is photographed by neither.",
+        "width_mm": 152,
+        "height_mm": 87.1,
+        "synthetic": True,
+        "photos": photos,
+        "plane": {"photo_id": base["id"], "corners": LEADER_POSES["head"], "size": list(size)},
+        "regions": [
+            rectangle("Scanned carrier", "inspection", .041, .151, .951, .823),
+            rectangle("Optical sound lane", "inspection", .062, .684, .940, .740),
+        ],
+        "registrations": {
+            other["id"]: {
+                "base_photo_id": base["id"],
+                "corners": LEADER_POSES["tail"],
+                "support_percent": round(100 * tail_support, 2),
+            },
+        },
+    }
+
+
 def load_training(store):
+    tiles = []
+    created = False
     existing = store.seeded_tiles(DEMO_KEY)
     if existing:
-        return existing, False
-    rows = [training_specimen(store, specimen) for specimen in SERIES]
-    return store.seed_tiles(DEMO_KEY, rows), True
+        tiles.extend(existing)
+    else:
+        rows = [training_specimen(store, specimen) for specimen in SERIES]
+        tiles.extend(store.seed_tiles(DEMO_KEY, rows))
+        created = True
+    leader = store.seeded_tiles(LEADER_KEY)
+    if leader:
+        tiles.extend(leader)
+    else:
+        tiles.extend(store.seed_tiles(LEADER_KEY, [leader_specimen(store)]))
+        created = True
+    return tiles, created
 
 
 @lru_cache(maxsize=1)

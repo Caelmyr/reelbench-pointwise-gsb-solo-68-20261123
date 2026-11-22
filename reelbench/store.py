@@ -65,6 +65,21 @@ CREATE TABLE IF NOT EXISTS metrology (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS metrology_tile ON metrology(tile_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS takes (
+    id TEXT PRIMARY KEY,
+    tile_id TEXT NOT NULL REFERENCES specimens(id),
+    result_id TEXT NOT NULL REFERENCES results(id),
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS takes_result ON takes(result_id);
+CREATE TABLE IF NOT EXISTS excerpts (
+    id TEXT PRIMARY KEY,
+    take_id TEXT NOT NULL REFERENCES takes(id),
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS excerpts_take ON excerpts(take_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -472,5 +487,57 @@ class Store:
             self._tile(conn, chosen)
             rows = conn.execute(
                 "SELECT document FROM metrology WHERE tile_id=? ORDER BY rowid DESC LIMIT 50", (chosen,),
+            ).fetchall()
+            return [json.loads(row["document"]) for row in rows]
+
+    def save_take(self, fields):
+        record = {**fields, "id": make_id(), "created_at": timestamp()}
+        with self.transaction(write=True) as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO takes(id,tile_id,result_id,document,created_at) VALUES (?,?,?,?,?)",
+                    (record["id"], record["tile_id"], record["result_id"], document(record), record["created_at"]),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ConflictError("This diagnostic already keeps an adopted recording.") from error
+            event(conn, record["tile_id"], "soundtake", f"Adopted optical track sample · {record['stats']['duration_s']} s")
+        return record
+
+    def take_for_result(self, result_id):
+        chosen = identity(result_id, "Measurement ID")
+        with self.connect() as conn:
+            row = conn.execute("SELECT document FROM takes WHERE result_id=?", (chosen,)).fetchone()
+            return json.loads(row["document"]) if row else None
+
+    def take(self, identifier):
+        chosen = identity(identifier, "Take ID")
+        with self.connect() as conn:
+            row = conn.execute("SELECT document FROM takes WHERE id=?", (chosen,)).fetchone()
+            return artifact_row(row, "Adopted recording")
+
+    def save_excerpt(self, fields):
+        record = {**fields, "id": make_id(), "created_at": timestamp()}
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                "INSERT INTO excerpts(id,take_id,document,created_at) VALUES (?,?,?,?)",
+                (record["id"], record["take_id"], document(record), record["created_at"]),
+            )
+            event(
+                conn, record["tile_id"], "soundtake",
+                f"Cut restoration excerpt {record['start_s']}–{record['end_s']} s",
+            )
+        return record
+
+    def excerpt(self, identifier):
+        chosen = identity(identifier, "Excerpt ID")
+        with self.connect() as conn:
+            row = conn.execute("SELECT document FROM excerpts WHERE id=?", (chosen,)).fetchone()
+            return artifact_row(row, "Restoration excerpt")
+
+    def excerpts_for_take(self, take_id):
+        chosen = identity(take_id, "Take ID")
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT document FROM excerpts WHERE take_id=? ORDER BY rowid LIMIT 60", (chosen,),
             ).fetchall()
             return [json.loads(row["document"]) for row in rows]

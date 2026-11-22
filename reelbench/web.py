@@ -44,6 +44,7 @@ from .parameters import TOOLS
 from .quality import quality_manifest
 from .photos import png_bytes
 from .review import parse_reviews, review_selection, save_reviews
+from .soundtrack import cut_excerpt, render_take
 from .store import Store
 from .study import create_study, public_metrics
 from .workspace import (
@@ -91,6 +92,13 @@ def png_blob(store, digest):
     if digest is None:
         raise MissingError("No image exists for this selected layer.")
     return send_file(store.blobs.require(digest), mimetype="image/png", conditional=True, max_age=48 * 3600)
+
+
+def audio_blob(store, digest, name=None):
+    return send_file(
+        store.blobs.require(digest), mimetype="audio/wav", conditional=True,
+        max_age=48 * 3600, download_name=name,
+    )
 
 
 def register_specimens(api, store, heavy):
@@ -377,6 +385,48 @@ def register_artifacts(api, store, heavy):
         return binary_response(artifact_json(study), "application/json", name + ".json")
 
 
+def register_recordings(api, store, heavy):
+    @api.post("/results/<measurement_id>/take")
+    def take_create(measurement_id):
+        with heavy:
+            record = render_take(store, measurement_id, json_request())
+        return jsonify(record), 201
+
+    @api.get("/results/<measurement_id>/take")
+    def take_for_measurement(measurement_id):
+        record = store.take_for_result(measurement_id)
+        if record is None:
+            raise MissingError("No adopted recording exists for this diagnostic.")
+        return jsonify(record)
+
+    @api.get("/takes/<take_id>")
+    def take_show(take_id):
+        return jsonify(store.take(take_id))
+
+    @api.get("/takes/<take_id>/audio.wav")
+    def take_audio(take_id):
+        return audio_blob(store, store.take(take_id)["audio"]["digest"], "optical-track-sample.wav")
+
+    @api.post("/takes/<take_id>/excerpts")
+    def excerpt_create(take_id):
+        with heavy:
+            record = cut_excerpt(store, take_id, json_request())
+        return jsonify(record), 201
+
+    @api.get("/takes/<take_id>/excerpts")
+    def excerpt_list(take_id):
+        store.take(take_id)
+        return jsonify({"items": store.excerpts_for_take(take_id)})
+
+    @api.get("/excerpts/<excerpt_id>")
+    def excerpt_show(excerpt_id):
+        return jsonify(store.excerpt(excerpt_id))
+
+    @api.get("/excerpts/<excerpt_id>/audio.wav")
+    def excerpt_audio(excerpt_id):
+        return audio_blob(store, store.excerpt(excerpt_id)["audio"]["digest"], "restoration-excerpt.wav")
+
+
 def register_desks(api, store, heavy):
     @api.get("/received")
     def received_list():
@@ -505,6 +555,7 @@ def create_app(data_dir=None):
     register_training(api, store, heavy)
     register_specimens(api, store, heavy)
     register_measurements(api, store, heavy)
+    register_recordings(api, store, heavy)
     register_artifacts(api, store, heavy)
     register_desks(api, store, heavy)
     app.register_blueprint(api)

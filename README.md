@@ -11,6 +11,10 @@ Start with `docker compose up --build` and open http://127.0.0.1:19990. The Comp
 3. In **Measure**, run **Perforation pitch** on Scanned carrier to see measured openings and interrupted pitches. Run **Frame gate survey** on Picture window for candidate picture bounds. **Optical track diagnostic** reads the marked lane and distinguishes dark dropouts from unobserved columns. **Optical density map** uses the clear-film patch and sensor floor; **Carrier alignment at splice** measures the edges on either side of a join.
 4. Use **Dust and scratch observations**, **Fine scratch network**, **Emulsion texture spacing** and **Line scan** to inspect surface and picture details. **Geometry** measures a marked area or trace. Each saved measurement retains the image map, source and a CSV table. Use **Evidence** to build an archive and **Received evidence** to verify its digests.
 
+## Adopted optical track samples
+
+When two registered scans cover the same leader, an **Optical track diagnostic** result can adopt one auditionable sample. The render reads the marked variable-area lane on both scans, keeps sprocket-hole bright spots out of the track, joins head and tail with a single equal-power fade inside a shared clear run, and leaves positions photographed by neither scan as marked silence. The take stores its perforation timebase, the chosen handoff point and per-segment scan provenance; only one adopted take is kept per diagnostic. Excerpts cut from the take reuse the stored timebase and continue to mark unobserved silence as having no film evidence.
+
 ## Input and interpretation
 
 Accepts single-frame PNG, JPEG, WebP or TIFF up to 24 MiB and 12 megapixels. A scan record holds up to 10 captures and 24 regions. A registered plane is limited to 1,800 pixels on its longest side. The dedicated film measurements use a horizontal carrier. They retain local support; planar distances do not measure curl. The optical track view is a diagnostic sampled from the supplied image. Optical density is relative to the photographed clear-film reference. The sample scans are synthetic.

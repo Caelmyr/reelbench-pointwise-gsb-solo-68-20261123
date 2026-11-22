@@ -1,7 +1,7 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
 
-const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
+const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,take:null,excerpts:[],config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
@@ -155,7 +155,7 @@ function measureControls() {
 }
 
 function measurements() {
-  return `<div class="grid-detail"><div>${state.result?resultCard(state.result,state.layer,state.tile.version):empty("Run a measurement to view its map and results.")}</div>
+  return `<div class="grid-detail"><div>${state.result?resultCard(state.result,state.layer,state.tile.version,{take:state.take,excerpts:state.excerpts}):empty("Run a measurement to view its map and results.")}</div>
     <div class="stack"><section class="card"><h3>Measure specimen</h3>${measureControls()}</section><section class="card"><h3>Saved measurements</h3>${specimenResultRows(state.results)}</section></div></div>`;
 }
 
@@ -633,6 +633,18 @@ function parsedOptions(data,tool) {
   }));
 }
 
+async function gatherRecording() {
+  state.take=null;
+  state.excerpts=[];
+  if (state.result?.kind!=="sound") return;
+  try {
+    state.take=await api(`/api/results/${state.result.id}/take`);
+  } catch (err) {
+    if (err.status!==404) throw err;
+  }
+  if (state.take) state.excerpts=(await api(`/api/takes/${state.take.id}/excerpts`)).items;
+}
+
 async function runMeasurement(data) {
   const revision=travel;
   const result=await api(tileUrl()+"/results",{method:"POST",body:{
@@ -643,8 +655,37 @@ async function runMeasurement(data) {
   if (revision!==travel) return;
   state.result=result;
   state.layer="overlay";
-  await gatherTile();
+  await Promise.all([gatherTile(),gatherRecording()]);
   toast("Measurement saved.");
+  render();
+}
+
+function takeForm() {
+  const record=state.result;
+  if (!record || record.kind!=="sound") throw Error("Open an optical track diagnostic first.");
+  const others=state.tile.photos.filter(item=>item.registered_url && item.id!==record.parameters.photo_id);
+  if (!others.length) throw Error("Register the second scan of the leader first.");
+  const carriers=state.tile.regions.filter(item=>item.purpose!=="ignore");
+  modal("Render adopted sample",`
+    <p class="notice">The head of the take comes from whichever scan reaches the leader start, the tail from the one that reaches its end. One short equal-power fade joins them inside a shared clear run; positions photographed by neither scan stay marked silence. Only one adopted take is kept on this diagnostic.</p>
+    ${selectField("Second scan","paired_photo_id",others.map(item=>option(item.id,`${item.role_label} · ${item.name}`)).join(""))}
+    ${selectField("Perforation region (travel timebase)","carrier_region_id",carriers.map(item=>option(item.id,item.name)).join(""))}
+    ${numField("Handoff fade (ms)","fade_ms",24,4,150,1)}`,"Render and adopt",async data=>{
+      state.take=await api(`/api/results/${record.id}/take`,{method:"POST",body:parseDatesAndNumbers(data,["fade_ms"])});
+      state.excerpts=[];
+      commitModal();
+      toast("Adopted sample stored on this diagnostic.");
+      render();
+    });
+}
+
+async function cutExcerpt(data) {
+  if (!state.take) throw Error("Render an adopted sample before cutting excerpts.");
+  const made=await api(`/api/takes/${state.take.id}/excerpts`,{method:"POST",body:{
+    start_s:Number(data.get("start_s")),end_s:Number(data.get("end_s")),note:String(data.get("note")||""),
+  }});
+  state.excerpts=(await api(`/api/takes/${state.take.id}/excerpts`)).items;
+  toast(made.unobserved_spans?"Excerpt saved — it contains marked no-evidence silence.":"Excerpt saved — fully observed.");
   render();
 }
 
@@ -711,6 +752,7 @@ async function doAction(name,target) {
       });
     },
     "mark-profile":lineForm,
+    "take-render":takeForm,
     "trace-add":()=>geometryMeasurementForm("trace"),
     "area-add":()=>geometryMeasurementForm("area"),
     "metrology-open":()=>{state.metrologyActive=state.metrology.find(item=>item.id===id);render();},
@@ -731,6 +773,7 @@ async function doAction(name,target) {
       state.result=await api("/api/results/"+id);
       state.layer="overlay";
       state.tab="measure";
+      await gatherRecording();
       render();
     },
     "result-layer":()=>{state.layer=value;render();},
@@ -782,7 +825,7 @@ document.addEventListener("click",event=>{
 
 document.addEventListener("submit",async event=>{
   const form=event.target;
-  if (!["measurement-form","dialog-form"].includes(form.id)) return;
+  if (!["measurement-form","dialog-form","excerpt-form"].includes(form.id)) return;
   event.preventDefault();
   if (working) return;
   working++;
@@ -793,6 +836,7 @@ document.addEventListener("submit",async event=>{
   if (error) error.textContent="";
   try {
     if (form.id==="measurement-form") await runMeasurement(data);
+    else if (form.id==="excerpt-form") await cutExcerpt(data);
     else if (currentForm) await currentForm(data);
   } catch(err) {
     displayFault(err,form.id==="dialog-form");
