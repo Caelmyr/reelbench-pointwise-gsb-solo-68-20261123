@@ -16,6 +16,7 @@ from .model import (
     ROLE_LABELS,
     dictionary,
     enumeration,
+    film_corner_fields,
     flag,
     identity,
     match_slot,
@@ -62,12 +63,14 @@ def summarize_tile(tile):
 
 def present_tile(tile):
     registrations = tile["registrations"]
+    film_corners = tile.get("film_corners") or {}
     photos = []
     for record in tile["photos"]:
         data = describe_photo(record, tile["plane"], registrations)
         data["preview_url"] = f"/api/specimens/{tile['id']}/photos/{record['id']}/preview"
         data["thumbnail_url"] = f"/api/specimens/{tile['id']}/photos/{record['id']}/thumbnail"
         data["original_url"] = f"/api/specimens/{tile['id']}/photos/{record['id']}/original"
+        data["film_corners"] = film_corners.get(record["id"])
         if data["registration_state"] != "unregistered":
             data["registered_url"] = f"/api/specimens/{tile['id']}/viewer/{record['id']}?v={tile['version']}"
         photos.append(data)
@@ -76,6 +79,7 @@ def present_tile(tile):
         **tile,
         "photos": photos,
         "canvas_size": native["size"] if native else None,
+        "film_corners": film_corners,
     }
 
 
@@ -149,6 +153,7 @@ def remove_photo(store, tile_id, capture_id, payload):
             tile["registrations"] = {}
             tile["regions"] = []
         tile["registrations"].pop(capture_id, None)
+        tile.get("film_corners", {}).pop(capture_id, None)
         tile["photos"].remove(photo)
 
     return store.edit_tile(tile_id, expected, change, "capture", "Removed a photo from the live specimen")
@@ -191,6 +196,8 @@ def save_plane(store, tile_id, payload):
         updated = {"photo_id": photo_id, "corners": corners, "size": list(size)}
         if tile["plane"] == updated:
             return
+        # Sampling regions are tied to the old plane, so changing it clears
+        # them. Film corner marks describe the photographs themselves and stay.
         if (tile["registrations"] or tile["regions"]) and not reset:
             raise ConflictError("Changing the specimen plane requires confirming reset of its live regions and registrations.")
         tile["plane"] = updated
@@ -199,6 +206,33 @@ def save_plane(store, tile_id, payload):
         tile["calibration"] = None
 
     return store.edit_tile(tile_id, expected, change, "plane", "Saved the photographed tile plane")
+
+
+def save_film_corners(store, identifier, photo_id, payload):
+    expected = model_version(payload)
+    photo_id = identity(photo_id, "Photo ID")
+    fields = film_corner_fields(payload)
+    corners = corners_parameter(fields["corners"])
+    homography(DEFAULT_CORNERS, corners)
+
+    def change(tile):
+        match_slot(tile["photos"], photo_id, "photo")
+        tile.setdefault("film_corners", {})[photo_id] = {
+            "corners": corners,
+            "note": fields["note"],
+        }
+
+    return store.edit_tile(identifier, expected, change, "film", "Marked the film's own four corners")
+
+
+def remove_film_corners(store, identifier, photo_id, payload):
+    expected = model_version(payload)
+
+    def change(tile):
+        match_slot(tile["photos"], photo_id, "photo")
+        tile.get("film_corners", {}).pop(photo_id, None)
+
+    return store.edit_tile(identifier, expected, change, "film", "Removed the film corner marks")
 
 
 def save_registration(store, identifier, photo_id, payload):

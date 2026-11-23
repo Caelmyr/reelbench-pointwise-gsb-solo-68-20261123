@@ -17,7 +17,8 @@ export function metricSet(record) {
     weave: () => [["Family A pitch",m.axis_a_pitch==null?"—":`${n(m.axis_a_pitch,3)} ${m.unit}`],["Family B pitch",m.axis_b_pitch==null?"—":`${n(m.axis_b_pitch,3)} ${m.unit}`],["Crossing",m.crossing_angle==null?"—":`${n(m.crossing_angle,1)}°`]],
     defects: () => {
       const reviewed = Object.values(record.decisions);
-      return [["Observed",m.total_observations],["Confirmed",reviewed.filter(item=>item.decision==="confirm").length],["Dismissed",reviewed.filter(item=>item.decision==="dismiss").length]];
+      const counts = m.provenance?.counts;
+      return [["Observed",m.total_observations],["Confirmed",reviewed.filter(item=>item.decision==="confirm").length],["On film",counts?counts.film:"—"],["On glass",counts?counts.glass:"—"]];
     },
     glare: () => [["Strong glare",percent(m.strong_glare_percent)],["Counted hotspots",m.hotspot_count],["Paired support",percent(m.support.overlap_percent)]],
     direction: () => [["Left-bright detail",percent(m.left_strong_percent)],["Right-bright detail",percent(m.right_strong_percent)],["Paired support",percent(m.support.overlap_percent)]],
@@ -37,7 +38,7 @@ function legend(record) {
   if (!record.legend) return "";
   const scale=record.legend;
   if (scale.mode==="categorical") {
-    return `<div class="legend"><span>Image classification</span><div class="swatches">${scale.labels.map(label=>dots(label.name,label.color)).join("")}</div></div>`;
+    return `<div class="legend"><span>${e(scale.label || "Image classification")}</span><div class="swatches">${scale.labels.map(label=>dots(label.name,label.color)).join("")}</div></div>`;
   }
   return `<div class="legend"><span>${e(scale.label)}</span><span>${n(scale.low,4)} to ${n(scale.high,4)}</span></div><div class="gradient ${e(scale.mode)}"></div>`;
 }
@@ -68,11 +69,20 @@ function aggregateDetail(m) {
 
 function defectsDetail(record) {
   const markers=record.metrics.observations;
+  const provenance=record.metrics.provenance;
+  const placement={};
+  (provenance?.items||[]).forEach(item=>{placement[item.key]=item;});
+  const label={film:"On film",glass:"On glass",undetermined:"Undetermined"};
   if (!markers.length) return "<p>No spots exceeded this run's current thresholds.</p>";
-  return `<h3>Review local observations</h3>
+  const meta=provenance?`<p class="plot-note">${e(provenance.note)}</p>
+    <div class="metrics">${stat("Travels with film",provenance.counts.film)}${stat("Stays on glass",provenance.counts.glass)}${stat("Undetermined",provenance.counts.undetermined)}</div>
+    <p class="plot-note">Strip motion between scans: ${n(provenance.motion.angle_deg,1)}°${provenance.motion.fixed_point?` about ${provenance.motion.fixed_point.map(value=>n(value,3)).join(", ")} in the shared plane`:""}.</p>`:
+    `<p class="notice">Run this census with a second scan at another angle to decide which marks travel with the film.</p>`;
+  return `<h3>Review local observations</h3>${meta}
     <div class="divider-list scroll-list">${markers.map(marker=>{
       const decision=record.decisions[marker.key]?.decision || "review";
-      return `<div class="row"><div class="grow"><strong>${e(marker.key)} · ${e(marker.type)}</strong><br><small>${n(marker.area_pixels,0)} px · ${e(marker.polarity)} · ${e(decision)}</small></div>
+      const place=placement[marker.key];
+      return `<div class="row"><div class="grow"><strong>${e(marker.key)} · ${e(marker.type)}</strong><br><small>${n(marker.area_pixels,0)} px · ${e(marker.polarity)} · ${e(decision)}${place?` · ${e(label[place.status])}`:""}${place?.matched_key?` · pairs with ${e(place.matched_key)}`:""}</small>${place?`<br><small>${e(place.reason)}</small>`:""}</div>
         ${btn("Confirm","defect-choice","tiny secondary",null,`data-marker="${e(marker.key)}" data-value="confirm"`)}
         ${btn("Dismiss","defect-choice","tiny ghost",null,`data-marker="${e(marker.key)}" data-value="dismiss"`)}
         ${btn("Note","defect-note","tiny ghost",null,`data-marker="${e(marker.key)}"`)}</div>`;
@@ -166,7 +176,7 @@ function details(record) {
   return render(record.kind==="defects" ? record : record.metrics);
 }
 
-export function resultCard(record, layer, currentRevision) {
+export function resultCard(record, layer, currentRevision, extra="") {
   const path=`/api/results/${record.id}`;
   const available = ["overlay","source",...(record.pictures.paired ? ["paired"] : []),...(record.metrics.reference_image ? ["reference"] : [])];
   const old = record.source_version !== currentRevision;
@@ -177,8 +187,11 @@ export function resultCard(record, layer, currentRevision) {
     ${layer==="overlay"?legend(record):""}
     ${metricSet(record)}
     <section>${details(record)}</section>
+    ${extra}
     <details><summary>Measurement source</summary>${table(["Property","Value"],[
-      ["Image",record.provenance.photo.display_name],["Image role",record.provenance.photo.role],["Region",record.provenance.region?.name || "Entire plane"],
+      ["Image",record.provenance.photo.display_name],["Image role",record.provenance.photo.role],
+      ["Compared image",record.provenance.paired_photo?.display_name || "—"],
+      ["Region",record.provenance.region?.name || "Entire plane"],
       ["Photo digest",record.provenance.photo.original_digest],
       ["Supported area",percent(record.support.available_percent)],
       ["Clipped pixels",record.support.clipped_pixels],

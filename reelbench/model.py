@@ -36,6 +36,7 @@ REGION_PURPOSES = {
     "bare": "Clear film base",
     "glazed": "Dense frame reference",
     "neutral": "Neutral color card",
+    "emulsion": "Damaged emulsion",
     "ignore": "Exclude from measurement",
 }
 ANALYSIS_LABELS = {
@@ -200,6 +201,14 @@ def flag_record_fields(payload):
     return {
         "decision": enumeration(data.get("decision"), ("confirm", "dismiss", "review"), "Decision"),
         "notes": string(data.get("notes"), "Observation notes", maximum=240, required=False),
+    }
+
+
+def film_corner_fields(payload):
+    data = dictionary(payload, "Film corners")
+    return {
+        "corners": data.get("corners"),
+        "note": string(data.get("note"), "Film corner note", maximum=240, required=False),
     }
 
 

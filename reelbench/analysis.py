@@ -5,6 +5,7 @@ from .art import (
     base_rgba,
     magnitude_overlay,
     profile_overlay,
+    provenance_markers,
     reviewed_markers,
     signed_overlay,
     stored_preview,
@@ -30,6 +31,7 @@ from .parameters import TOOLS, analysis_parameters
 from .profile import measure_profile
 from .pores import measure_pores
 from .dots import measure_dots
+from .provenance import match_observation_provenance
 from .store import key_for
 from .texture import measure_texture
 from .weave import measure_weave
@@ -89,6 +91,7 @@ def specimen_provenance(tile):
         "firing": tile["firing"],
         "batch": tile["batch"],
         "physical_mm": [tile["width_mm"], tile["height_mm"]],
+        "film_corners": tile.get("film_corners") or {},
     }
 
 
@@ -136,9 +139,14 @@ def resolve_parameters(store, tile, payload):
     setting = TOOLS[kind]
     roles = setting.get("capture_pair")
     params["photo_id"] = selected_capture(tile, params["photo_id"], roles[0] if roles else None)
-    params["comparison_id"] = selected_capture(tile, params["comparison_id"], roles[1]) if roles else None
-    if not roles and payload.get("comparison_id"):
+    if roles:
+        params["comparison_id"] = selected_capture(tile, params["comparison_id"], roles[1])
+    elif kind == "defects":
+        params["comparison_id"] = selected_capture(tile, params["comparison_id"]) if params["comparison_id"] else None
+    elif payload.get("comparison_id"):
         raise InputError("This measurement uses one capture.")
+    if kind == "defects" and params["comparison_id"] == params["photo_id"]:
+        raise InputError("Choose a different capture for the turned scan.")
     reference = None
     if kind == "reference":
         reference = store.reference(params["options"]["reference_id"])
@@ -233,6 +241,8 @@ def compute_single(store, tile, frame, region, area, linear, correction, params,
 def compute_pair(tile, first, second, area, params):
     kind = params["kind"]
     options = params["options"]
+    if kind == "defects":
+        return None
     if kind == "glare":
         ties = active_region(tile, options["balance_region"])
         calibration_area = area if ties is None else region_domain(first.extent, tile, ties)
@@ -247,9 +257,16 @@ def compute_pair(tile, first, second, area, params):
 
 
 def result_key(tile, params, reference):
+    keyed = {**params}
+    if params["kind"] == "defects":
+        corners = tile.get("film_corners") or {}
+        keyed["film_corners"] = {
+            identifier: corners.get(identifier, {}).get("corners")
+            for identifier in filter(None, (params["photo_id"], params["comparison_id"]))
+        }
     return key_for({
         "analyzer_version": ANALYZER_VERSION,
-        "params": params,
+        "params": keyed,
         "tile_id": tile["id"],
         "tile_version": tile["version"],
         "reference_version": reference["version"] if reference else None,
@@ -269,7 +286,25 @@ def evaluate(store, tile_id, payload):
     pair = specimen_frame(store.blobs, tile, params["comparison_id"]) if params["comparison_id"] else None
     correction = None
     linear = frame.linear
-    if pair is not None:
+    if params["kind"] == "defects":
+        linear, correction = corrected_linear(tile, frame, params["apply_neutral"])
+        metrics = measure_defects(frame, linear, area, params["options"])
+        if pair is not None:
+            comparison_linear, _ = corrected_linear(tile, pair, params["apply_neutral"])
+            comparison = measure_defects(pair, comparison_linear, area, params["options"])
+            metrics["comparison"] = comparison
+            metrics["provenance"] = match_observation_provenance(
+                tile, frame, pair, metrics, comparison,
+            )
+        picture = provenance_markers(
+            frame, metrics["observations"], metrics.get("provenance"), source=linear,
+        )
+        legend = {"mode": "categorical", "label": "Placement", "labels": [
+            {"name": "Travels with film", "color": "#f7c56f"},
+            {"name": "Stays on glass", "color": "#81c4d6"},
+            {"name": "Undetermined", "color": "#b4b0a8"},
+        ]} if pair is not None else None
+    elif pair is not None:
         metrics, picture, legend = compute_pair(tile, frame, pair, area, params)
     else:
         linear, correction = corrected_linear(tile, frame, params["apply_neutral"])

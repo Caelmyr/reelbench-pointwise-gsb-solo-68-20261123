@@ -9,6 +9,7 @@ from .model import InputError, collection, dictionary, enumeration, string
 
 REVIEW_COLOR = {"confirm": (162, 225, 171), "review": ACCENT, "dismiss": (159, 162, 154)}
 REVIEW_PRIORITY = {"review": 0, "confirm": 1, "dismiss": 2}
+PLACEMENT_COLOR = {"film": (247, 197, 111), "glass": (129, 196, 214), "undetermined": (180, 176, 168)}
 
 
 def marker_position(bounds, image_size, padding):
@@ -27,15 +28,21 @@ def block_radius(width, height, bbox):
 
 def marker_meta(record, labels):
     observations = record["metrics"]["observations"]
+    provenance = record["metrics"].get("provenance") or {}
+    has_placement = bool(provenance.get("items"))
+    placement = {item["key"]: item for item in provenance.get("items", [])}
     calculated = []
     for observation in observations:
         key = observation["key"]
         mark = labels.get(key)
         status = mark["decision"] if mark else "review"
+        place = placement.get(key, {})
         calculated.append({
             **observation,
             "decision": status,
             "notes": mark.get("notes", "") if mark else "",
+            "placement": place.get("status", "undetermined") if has_placement else None,
+            "placement_reason": place.get("reason", "no turned scan comparison"),
         })
     return calculated
 
@@ -46,14 +53,16 @@ def candidate_filter(markers, mode, query):
     for marker in markers:
         if mode != "all" and marker["decision"] != mode:
             continue
-        if terms and not any(terms in value.casefold() for value in (marker["key"], marker["type"], marker["notes"])):
+        if terms and not any(terms in value.casefold() for value in (
+            marker["key"], marker["type"], marker["notes"], marker["placement"] or "",
+        )):
             continue
         result.append(marker)
     result.sort(key=lambda item: (REVIEW_PRIORITY[item["decision"]], -item["strength"], item["key"]))
     return result
 
 
-def disp_mark(draw, image_size, marker):
+def disp_mark(draw, image_size, marker, tone=None):
     width, height = image_size
     x, y = marker["normalized_center"]
     coords = round(x * width), round(y * height)
@@ -61,7 +70,7 @@ def disp_mark(draw, image_size, marker):
     radius = block_radius(width, height, bbox)
     position = (coords[0] - radius, coords[1] - radius, coords[0] + radius, coords[1] + radius)
     line = max(1, round(min(width, height) / 325))
-    tone = REVIEW_COLOR[marker["decision"]]
+    tone = tone or REVIEW_COLOR[marker["decision"]]
     draw.ellipse(position, outline=SHADOW, width=line + 2)
     draw.ellipse(position, outline=tone, width=line)
     if marker["decision"] == "dismiss":
@@ -106,7 +115,7 @@ def redraw_review(blobs, record, decisions, *, mode="all", query=""):
     for mark in markers:
         if mark["decision"]=="dismiss" and mode=="all":
             continue
-        position = disp_mark(draw, image.size, mark)
+        position = disp_mark(draw, image.size, mark, PLACEMENT_COLOR[mark["placement"]] if mark["placement"] else None)
         if len(markers) <= 70:
             draw_label(draw, image.size, position, mark, labels)
     return image
@@ -129,18 +138,32 @@ def parse_reviews(payload):
 
 def observation_balance(markers, shape=None):
     counts = {name: 0 for name in REVIEW_COLOR}
+    placements = {name: 0 for name in PLACEMENT_COLOR}
     occupied = np.zeros((3, 3), dtype=np.int32)
     for marker in markers:
         status = marker["decision"]
         counts[status] += 1
         if status == "dismiss":
             continue
+        placements[marker["placement"] or "undetermined"] += 1
         u, v = marker["normalized_center"]
         occupied[min(int(v * 3), 2), min(int(u * 3), 2)] += 1
     return {
         "counts": counts,
+        "placements": placements,
         "trace_distribution": occupied.tolist(),
         "extent": list(shape) if shape else None,
+    }
+
+
+def detector_settings(record):
+    options = record["parameters"]["options"]
+    return {
+        "sensitivity": options["sensitivity"],
+        "spot_radius": options["spot_radius"],
+        "polarity": options["polarity"],
+        "minimum_area": options["minimum_area"],
+        "maximum_area": options["maximum_area"],
     }
 
 
@@ -156,7 +179,10 @@ def save_reviews(store, measurement_id, expected, changes):
     artwork = redraw_review(store.blobs, record, decisions)
     summary = observation_balance(marker_meta(record, decisions), artwork.size)
     digest = stored_preview(artwork, store.blobs)
-    return store.save_decisions(measurement_id, expected, changes, digest, summary)
+    return store.save_decisions(
+        measurement_id, expected, changes, digest, summary,
+        detector_settings(record),
+    )
 
 
 def review_selection(record, mode, query):

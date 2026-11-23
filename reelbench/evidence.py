@@ -47,14 +47,17 @@ def result_metrics_table(record):
     elif kind == "defects":
         columns = (
             "key", "type", "polarity", "area_pixels", "area_mm2", "normalized_center", "bounds", "peak_contrast",
-            "decision", "notes",
+            "placement", "matched_key", "decision", "notes",
         )
+        placement = {item["key"]: item for item in (metrics.get("provenance") or {}).get("items", [])}
         rows = []
         decisions = record.get("decisions", {})
         for marker in metrics["observations"]:
             decision = decisions.get(marker["key"], {})
-            row = [marker[key] for key in columns[:-2]]
-            rows.append([*row, decision.get("decision", ""), decision.get("notes", "")])
+            place = placement.get(marker["key"], {})
+            row = [marker[key] for key in columns[:8]]
+            rows.append([*row, place.get("status", ""), place.get("matched_key", ""),
+                         decision.get("decision", ""), decision.get("notes", "")])
     elif kind == "color":
         columns = ("cell", "bounds", "pixels", "lab", "delta_from_center", "within_p90", "swatch")
         rows = ([item[key] for key in columns] for item in metrics["cells"])

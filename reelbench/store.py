@@ -69,6 +69,26 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS plans (
+    id TEXT PRIMARY KEY,
+    tile_id TEXT NOT NULL REFERENCES specimens(id),
+    measurement_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS plans_measurement ON plans(measurement_id);
+CREATE INDEX IF NOT EXISTS plans_tile ON plans(tile_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS plan_checks (
+    id TEXT PRIMARY KEY,
+    tile_id TEXT NOT NULL REFERENCES specimens(id),
+    plan_id TEXT NOT NULL REFERENCES plans(id),
+    measurement_id TEXT NOT NULL,
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_checks_tile ON plan_checks(tile_id, created_at DESC);
 """
 
 
@@ -195,6 +215,7 @@ class Store:
             "regions": fields.get("regions", []),
             "plane": fields.get("plane"),
             "registrations": fields.get("registrations", {}),
+            "film_corners": fields.get("film_corners", {}),
             "calibration": fields.get("calibration"),
             "synthetic": fields.get("synthetic", False),
         }
@@ -300,7 +321,7 @@ class Store:
             ).fetchall()
             return [json.loads(row["document"]) for row in rows]
 
-    def save_decisions(self, identifier, expected_version, choices, picture, summary):
+    def save_decisions(self, identifier, expected_version, choices, picture, summary, settings):
         with self.transaction(write=True) as conn:
             result = self._result(conn, identifier)
             self.require_version(result, expected_version)
@@ -313,6 +334,7 @@ class Store:
                 edited += 1
             if not edited:
                 return result
+            result["detector"] = settings
             result["pictures"]["overlay"] = picture
             result["review_summary"] = summary
             result["version"] += 1
@@ -448,6 +470,83 @@ class Store:
     def received_packets(self):
         with self.connect() as conn:
             rows = conn.execute("SELECT document FROM received ORDER BY rowid DESC LIMIT 60").fetchall()
+            return [json.loads(row["document"]) for row in rows]
+
+    def _plan(self, conn, identifier):
+        plan_id = identity(identifier, "Cleaning plan ID")
+        row = conn.execute("SELECT document FROM plans WHERE id=?", (plan_id,)).fetchone()
+        return artifact_row(row, "Cleaning plan")
+
+    def plan(self, identifier):
+        with self.connect() as conn:
+            return self._plan(conn, identifier)
+
+    def plan_for_measurement(self, measurement_id):
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT document FROM plans WHERE measurement_id=?", (identity(measurement_id, "Measurement ID"),),
+            ).fetchone()
+            return json.loads(row["document"]) if row else None
+
+    def plans(self, tile_id):
+        chosen = identity(tile_id, "Specimen ID")
+        with self.connect() as conn:
+            self._tile(conn, chosen)
+            rows = conn.execute(
+                "SELECT document FROM plans WHERE tile_id=? ORDER BY rowid DESC LIMIT 60", (chosen,),
+            ).fetchall()
+            return [json.loads(row["document"]) for row in rows]
+
+    def save_plan(self, fields, existing=None):
+        now = timestamp()
+        with self.transaction(write=True) as conn:
+            if existing is None:
+                record = {**fields, "id": make_id(), "version": 1, "created_at": now, "updated_at": now}
+                conn.execute(
+                    "INSERT INTO plans(id,tile_id,measurement_id,version,document,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                    (record["id"], record["tile_id"], record["measurement_id"], 1, document(record), now, now),
+                )
+                event(conn, record["tile_id"], "plan", f"Adopted cleaning plan: {record['adopted']['label'] if record['adopted'] else 'no cleanable mark'}")
+                return record
+            record = {**fields, "id": existing["id"], "version": existing["version"] + 1, "created_at": existing["created_at"], "updated_at": now}
+            conn.execute(
+                "UPDATE plans SET version=?, document=?, updated_at=? WHERE id=?",
+                (record["version"], document(record), now, record["id"]),
+            )
+            event(conn, record["tile_id"], "plan", f"Replaced cleaning plan: {record['adopted']['label'] if record['adopted'] else 'no cleanable mark'}")
+            return record
+
+    def save_plan_check(self, tile_id, plan_id, fields):
+        record = {**fields, "id": make_id(), "created_at": timestamp()}
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                "INSERT INTO plan_checks(id,tile_id,plan_id,measurement_id,document,created_at) VALUES (?,?,?,?,?,?)",
+                (record["id"], tile_id, plan_id, record["measurement_id"], document(record), record["created_at"]),
+            )
+            event(conn, tile_id, "cleaning-check", "Checked cleaned spots against a later scan")
+        return record
+
+    def plan_check(self, identifier):
+        check_id = identity(identifier, "Cleaning check ID")
+        with self.connect() as conn:
+            row = conn.execute("SELECT document FROM plan_checks WHERE id=?", (check_id,)).fetchone()
+            return artifact_row(row, "Cleaning check")
+
+    def plan_checks(self, tile_id):
+        chosen = identity(tile_id, "Specimen ID")
+        with self.connect() as conn:
+            self._tile(conn, chosen)
+            rows = conn.execute(
+                "SELECT document FROM plan_checks WHERE tile_id=? ORDER BY rowid DESC LIMIT 60", (chosen,),
+            ).fetchall()
+            return [json.loads(row["document"]) for row in rows]
+
+    def plan_checks_for(self, plan_id):
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT document FROM plan_checks WHERE plan_id=? ORDER BY rowid DESC LIMIT 60",
+                (identity(plan_id, "Cleaning plan ID"),),
+            ).fetchall()
             return [json.loads(row["document"]) for row in rows]
 
     def save_metrology(self, fields):

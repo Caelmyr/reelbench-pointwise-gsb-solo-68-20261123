@@ -7,6 +7,7 @@ from flask import Blueprint, Flask, Response, jsonify, request, send_file, send_
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
 from .analysis import approve_reference, evaluate
+from .cleaning import create_plan, plan_summary, save_check
 from .demo import load_training, preview_photo
 from .evidence import (
     artifact_json,
@@ -56,6 +57,8 @@ from .workspace import (
     preview_transform,
     remove_photo,
     remove_region,
+    remove_film_corners,
+    save_film_corners,
     save_plane,
     save_region,
     save_registration,
@@ -168,6 +171,14 @@ def register_specimens(api, store, heavy):
         with heavy:
             specimen = save_registration(store, specimen_id, photo_id, json_request())
         return jsonify(present_tile(specimen))
+
+    @api.put("/specimens/<specimen_id>/film-corners/<photo_id>")
+    def film_corner_save(specimen_id, photo_id):
+        return jsonify(present_tile(save_film_corners(store, specimen_id, photo_id, json_request())))
+
+    @api.delete("/specimens/<specimen_id>/film-corners/<photo_id>")
+    def film_corner_remove(specimen_id, photo_id):
+        return jsonify(present_tile(remove_film_corners(store, specimen_id, photo_id, json_request())))
 
     @api.post("/specimens/<specimen_id>/geometry/<photo_id>/preview")
     def geometry_test(specimen_id, photo_id):
@@ -409,6 +420,57 @@ def register_desks(api, store, heavy):
     @api.get("/specimens/<specimen_id>/metrology")
     def geometry_records(specimen_id):
         return jsonify({"items": store.list_metrology(specimen_id)})
+
+    @api.get("/specimens/<specimen_id>/plans")
+    def cleaning_plans(specimen_id):
+        items = store.plans(specimen_id)
+        return jsonify({"items": [plan_summary(item) for item in items]})
+
+    @api.post("/specimens/<specimen_id>/plans")
+    def cleaning_plan_make(specimen_id):
+        data = json_request()
+        measurement_id = identity(data.get("measurement_id"), "Measurement ID")
+        record = store.result(measurement_id)
+        if record["tile_id"] != identity(specimen_id, "Specimen ID"):
+            raise InputError("This measurement belongs to another specimen.")
+        with heavy:
+            plan = create_plan(store, measurement_id, data)
+        return jsonify(plan), 201
+
+    @api.get("/plans/<plan_id>")
+    def cleaning_plan_show(plan_id):
+        return jsonify({
+            "plan": store.plan(plan_id),
+            "checks": store.plan_checks_for(plan_id),
+        })
+
+    @api.get("/plans/<plan_id>/document.json")
+    def cleaning_plan_document(plan_id):
+        plan = store.plan(plan_id)
+        name = filename_stem(plan["adopted"]["label"] if plan["adopted"] else "cleaning-plan", "cleaning-plan")
+        return binary_response(artifact_json(plan), "application/json", name + ".json")
+
+    @api.get("/plans/<plan_id>/image/<layer>")
+    def cleaning_plan_image(plan_id, layer):
+        plan = store.plan(plan_id)
+        chosen = enumeration(layer, ("source", "overlay", "paired"), "Plan image")
+        return png_blob(store, plan["pictures"].get(chosen))
+
+    @api.post("/plans/<plan_id>/checks")
+    def cleaning_check_make(plan_id):
+        with heavy:
+            entry = save_check(store, plan_id, json_request())
+        return jsonify(entry), 201
+
+    @api.get("/plan-checks/<check_id>/image/<layer>")
+    def cleaning_check_image(check_id, layer):
+        entry = store.plan_check(check_id)
+        chosen = enumeration(layer, ("original_source", "original_overlay", "followup_source", "followup_overlay"), "Check image")
+        return png_blob(store, entry["pictures"].get(chosen))
+
+    @api.get("/specimens/<specimen_id>/plan-checks")
+    def cleaning_checks(specimen_id):
+        return jsonify({"items": store.plan_checks(specimen_id)})
 
     @api.post("/specimens/<specimen_id>/metrology")
     def geometry_make(specimen_id):

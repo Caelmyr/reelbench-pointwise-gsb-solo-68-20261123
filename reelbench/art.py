@@ -93,6 +93,37 @@ def reviewed_markers(frame, observations, decisions=None, source=None):
     return image
 
 
+PROVENANCE_COLORS = {
+    "film": (247, 197, 111),
+    "glass": (129, 196, 214),
+    "undetermined": (180, 176, 168),
+}
+
+
+def provenance_markers(frame, observations, provenance, decisions=None, source=None):
+    """Tint every observation by where the turned scan says it belongs."""
+    image = base_rgba(frame, source)
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    short_edge = min(width, height)
+    line = max(1, round(short_edge / 320))
+    radius = max(5, round(short_edge / 92))
+    lookup = {item["key"]: item for item in (provenance or {}).get("items", [])}
+    reviewed = decisions or {}
+    for observation in observations:
+        key = observation["key"]
+        if reviewed.get(key, {}).get("decision") == "dismiss":
+            continue
+        status = lookup.get(key, {}).get("status", "undetermined")
+        color = PROVENANCE_COLORS[status]
+        x, y = curve_points([observation["normalized_center"]], image.size)[0]
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=SHADOW, width=line + 2)
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=color, width=line)
+        if len(observations) <= 35:
+            draw.text((x + radius + 5, y - 7), key, fill=color, stroke_width=2, stroke_fill=SHADOW)
+    return image
+
+
 def profile_overlay(frame, endpoints, band_pixels, source=None):
     image = base_rgba(frame, source)
     draw = ImageDraw.Draw(image)

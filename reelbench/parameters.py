@@ -39,7 +39,7 @@ TOOLS = {
     },
     "defects": {
         "label": "Dust and scratch observations",
-        "description": "Find local spots and elongated marks, then review observations by location.",
+        "description": "Find local spots and elongated marks, review them by location, and place them on the film or the glass with a second, turned scan.",
         "fields": {
             "sensitivity": {"kind": "number", "label": "Sensitivity", "default": 0.63, "min": 0, "max": 1, "step": 0.01},
             "spot_radius": {"kind": "number", "label": "Search radius px", "default": 5, "min": 1.2, "max": 32, "step": 0.1},

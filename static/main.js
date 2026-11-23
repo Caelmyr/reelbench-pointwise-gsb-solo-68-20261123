@@ -1,7 +1,7 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
 
-const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
+const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:"",plans:[],planChecks:[],plan:null};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
@@ -10,7 +10,7 @@ const nav=[
   ["received","Received evidence","archive"],
 ];
 const tabs=[
-  ["captures","Captures","camera"],["regions","Sampling regions","frame"],["measure","Measure","measure"],["geometry","Geometry","frame"],["evidence","Evidence","archive"],
+  ["captures","Captures","camera"],["regions","Sampling regions","frame"],["measure","Measure","measure"],["cleaning","Cleaning","check"],["geometry","Geometry","frame"],["evidence","Evidence","archive"],
 ];
 const tileUrl=()=>`/api/specimens/${state.tile.id}`;
 const tileData=extra=>({version:state.tile.version,...extra});
@@ -75,6 +75,11 @@ function regions(purpose,includeNone=true) {
   return (includeNone?option("","Entire plane",""):"")+choices.map(item=>option(item.id,item.name)).join("");
 }
 
+function censusSelection() {
+  const all=state.tile.photos.filter(item=>item.registered_url);
+  return all.map(item=>option(item.id,`${item.role_label} · ${item.name}${item.film_corners?" · film marked":""}`)).join("");
+}
+
 function imagesForCapture() {
   const photo=currentPhoto();
   const tile=state.tile;
@@ -98,14 +103,14 @@ function captureSide() {
   const tile=state.tile;
   const selected=currentPhoto();
   const rows=tile.photos.map(item=>`<div class="row">${img(item.thumbnail_url,"", 'class="item-image"')}
-    <div class="grow"><span class="row-title">${e(item.role_label)}</span><small>${e(item.registration_state)} · ${item.width} × ${item.height}</small></div>
+    <div class="grow"><span class="row-title">${e(item.role_label)}</span><small>${e(item.registration_state)} · ${item.width} × ${item.height}${item.film_corners?" · film corners":""}</small></div>
     ${btn("View","photo-view",selected?.id===item.id?"tiny primary":"tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("");
   const listed=selected?selected.diagnostics.map(value=>`<li>${e(value)}</li>`).join(""):"";
   return `<div class="stack"><section class="card"><div class="title-row"><h3>Capture set</h3>${btn("Add photo","photo-add","tiny secondary","plus")}</div>
   ${rows?`<div class="divider-list">${rows}</div>`:"<p class='soft'>No photos in this set.</p>"}
-  </section>${selected?`<section class="card"><h3>Capture observations</h3><div class="metrics">
+  <p class="soft">Marking the film's own four corners on each capture is what lets the bench tell a mark that travels with the strip from one that stays on the scan glass.</p></section>${selected?`<section class="card"><h3>Capture observations</h3><div class="metrics">
   ${stat("Highlight clipping",percent(selected.stats.white_clip_percent))}${stat("Shadow clipping",percent(selected.stats.black_clip_percent))}${stat("Opaque support",percent(selected.stats.supported_percent))}</div>
-  ${listed?`<ul>${listed}</ul>`:"<p class='soft'>No warnings at thumbnail scale.</p>"}<div class="actions">${btn("Edit photo","photo-edit","tiny secondary","edit")}${btn("Remove photo","photo-remove","tiny danger")}</div></section>`:""}</div>`;
+  ${listed?`<ul>${listed}</ul>`:"<p class='soft'>No warnings at thumbnail scale.</p>"}<div class="actions">${btn("Edit photo","photo-edit","tiny secondary","edit")}${btn(selected.film_corners?"Edit film corners":"Mark film corners","film-corners","tiny secondary","frame")}${selected.film_corners?btn("Remove film corners","film-corners-remove","tiny ghost"):""}${btn("Remove photo","photo-remove","tiny danger")}</div></section>`:""}</div>`;
 }
 
 function captures() {
@@ -141,12 +146,14 @@ function optionInput(key,item) {
 function measureControls() {
   const tool=state.config.tools[state.tool];
   const all=state.tile.photos.filter(item=>item.registered_url);
-  const match=field=>sources(tool.capture_pair?all.filter(item=>item.role===tool.capture_pair[field]):all,null,tool.capture_pair?"Auto if unique":"Base capture");
+  const markable=state.tool==="defects";
+  const match=field=>sources(tool.capture_pair?all.filter(item=>item.role===tool.capture_pair[field]):all,null,tool.capture_pair?"Auto if unique":markable?"Same scan only":"Base capture");
   return `<form id="measurement-form" class="form-stack">
     ${selectField("Measurement","kind",Object.entries(state.config.tools).map(([name,item])=>option(name,item.label,state.tool)).join(""))}
     <p class="soft">${e(tool.description)}</p>
     ${selectField(tool.capture_pair?"First photo":"Photo source","photo_id",match(0))}
-    ${tool.capture_pair?selectField("Paired photo","comparison_id",match(1)):checkField("Apply saved neutral balance","apply_neutral",true)}
+    ${tool.capture_pair?selectField("Paired photo","comparison_id",match(1)):markable?selectField("Second scan, turned","comparison_id",(all.length?"":"")+option("","Same scan only","")+censusSelection()):checkField("Apply saved neutral balance","apply_neutral",true)}
+    ${markable?`<p class="soft">With a second scan at another angle, each mark is placed on the film and on the glass, and only the film or the glass can claim it.</p>`:""}
     ${selectField("Region","region_id",regions())}
     <div class="form-columns">${Object.entries(tool.fields).map(([key,item])=>optionInput(key,item)).join("")}</div>
     ${["profile","marking","joint"].includes(state.tool)?btn("Mark line on image","mark-profile","secondary","measure"):""}
@@ -155,8 +162,60 @@ function measureControls() {
 }
 
 function measurements() {
-  return `<div class="grid-detail"><div>${state.result?resultCard(state.result,state.layer,state.tile.version):empty("Run a measurement to view its map and results.")}</div>
-    <div class="stack"><section class="card"><h3>Measure specimen</h3>${measureControls()}</section><section class="card"><h3>Saved measurements</h3>${specimenResultRows(state.results)}</section></div></div>`;
+  const plan=state.plans?.find(item=>item.measurement_id===state.result?.id);
+  const check=plan?state.planChecks?.find(item=>item.plan_id===plan.id):null;
+  const extra=state.result?.kind==="defects"?`<div class="notice">Marks that travel with the film may be cleaned from the strip; marks that stay on the glass are cleaned from the carrier. Undetermined spots are left for another angle.</div>
+    ${plan?`<div class="notice"><strong>${e(plan.label)}</strong> · ${plan.clears} mark${plan.clears===1?"":"s"}${check?` · last rescan: ${check.counts.remaining} still present, ${check.counts.removed} gone, ${check.counts.unseen} unseen`:""}</div>`:""}
+    <div class="actions">${btn(plan?"Open adopted cleaning plan":"Plan cleaning from this census","plan-open","secondary","check",`data-id="${plan?.id||""}" data-measurement="${state.result.id}"`)}</div>`:"";
+  return `<div class="grid-detail"><div>${state.result?resultCard(state.result,state.layer,state.tile.version,extra):empty("Run a measurement to view its map and results.","")}</div>
+    <div class="stack"><section class="card"><h3>Measure specimen</h3><p class="soft">A second scan at another angle lets Dust and scratch observations say which marks travel with the film.</p>${measureControls()}</section><section class="card"><h3>Saved measurements</h3>${specimenResultRows(state.results)}</section></div></div>`;
+}
+
+function planPanel() {
+  const data=state.plan;
+  if (!data?.plan) return empty("Plan cleaning from a Dust and scratch observation that was compared with a second scan.");
+  const plan=data.plan;
+  const base=`/api/plans/${plan.id}`;
+  const checks=data.checks||[];
+  const check=checks[0];
+  const status={"film":"Travels with film","glass":"Stays on glass","undetermined":"Undetermined"};
+  const candidates=plan.candidates.map(entry=>`<div class="row"><div class="grow"><strong>${e(entry.label)}</strong><br><small>${entry.clears} settled mark${entry.clears===1?"":"s"}${entry.touches_damaged_emulsion?` · crosses marked damaged emulsion (${entry.emulsion.mark_keys.join(", ")})`:""}</small></div>${entry.object===plan.adopted_object?badge("Adopted","ready"):badge("Not this round","caution")}</div>`).join("");
+  const adopted=plan.adopted;
+  const rows=adopted?adopted.spots.map(spot=>{
+    const result=check?.items.find(item=>item.key===spot.key);
+    return [spot.key,status[adopted.object==="glass"?"glass":"film"],n(spot.area_pixels,0),result?result.state:"—",result?.matched_key||"—"];
+  }):[];
+  return `<section class="card stack"><div class="title-row"><div><h3>Adopted cleaning plan</h3><small>Measurement ${e(plan.measurement_id.slice(0,8))} · saved ${e(date(plan.created_at))}</small></div>${adopted?badge(adopted.label,"ready"):badge("No cleanable mark","caution")}</div>
+    <div class="metrics">${stat("On film",plan.counts.film)}${stat("On glass",plan.counts.glass)}${stat("Undetermined",plan.counts.undetermined)}${stat("Settled",plan.settled_marks)}</div>
+    <p class="notice">${e(plan.reason)}</p>
+    <div class="divider-list">${candidates}</div>
+    <p class="soft">${e(plan.basis)} One step only: ${adopted?`clean the ${adopted.object==="glass"?"scan glass":"film"}`:"no object is adopted"} this round.</p>
+    ${adopted?`<h3>Marks this step should clear</h3>${table(["Mark","Placement","Area px","After rescan","Pairs with"],rows)}`:`<p class="soft">No settled mark is left to clean.</p>`}
+    ${plan.excluded.length?`<details><summary>Left alone (${plan.excluded.length})</summary>${table(["Mark","Reason"],plan.excluded.map(item=>[item.key,item.reason]))}</details>`:""}
+    <h3>Compare after cleaning</h3><p class="soft">Scan again at a new angle, run Dust and scratch observations on that single scan, then check it here. Positions are read on the ${adopted?e(adopted.object==="glass"?"glass":"film"):"adopted object"}; spots the new scan cannot see stay unseen.</p>
+    <div class="actions">${btn("Check a later scan","plan-check","secondary","measure",`data-id="${plan.id}"`)}</div>
+    ${check?`<div class="metrics">${stat("Still present",check.counts.remaining)}${stat("Gone",check.counts.removed)}${stat("Unseen",check.counts.unseen)}</div>
+      ${table(["Mark","After rescan","Pairs with","Distance px"],check.items.map(item=>[item.key,item.state,item.matched_key||"—",item.distance_px==null?"—":n(item.distance_px,2)]))}
+      ${(check.notes||[]).map(item=>`<p class="notice warn">${e(item)}</p>`).join("")}
+      <p class="plot-note">${e(check.note)}</p>
+      <div class="stage-pair">${img(`/api/plan-checks/${check.id}/image/original_overlay`,"Original census overlay")}${img(`/api/plan-checks/${check.id}/image/followup_overlay`,"Rescan overlay")}</div>
+      <p class="stage-foot">Left: original census. Right: the later scan.</p>`:`<p class="soft">No follow-up check saved yet.</p>`}
+    <details><summary>Original census record</summary>${table(["Mark","Type","Area px","Placement","Review"],plan.observations.map(item=>{
+      const place=(plan.placement||{})[item.key]||"undetermined";
+      const decision=plan.decisions[item.key]?.decision||"review";
+      return [item.key,item.type,n(item.area_pixels,0),status[place],decision];
+    }))}
+    <p class="soft">${e(plan.capture.display_name)}${plan.paired_capture?` paired with ${e(plan.paired_capture.display_name)}`:""}. The original source and overlay stay with this plan.</p>
+    <div class="stage-pair">${img(`${base}/image/source`,"Original census source")}${img(`${base}/image/overlay`,"Original census overlay")}</div></details>
+    <div class="actions">${link("Plan JSON",`${base}/document.json`,"secondary","download")}</div></section>`;
+}
+
+function cleaningPage() {
+  const items=state.plans||[];
+  const checks=state.planChecks||[];
+  return `<div class="grid-detail">${planPanel()}<div class="stack"><section class="card"><h3>Saved cleaning plans</h3>
+    <div class="divider-list">${items.map(item=>`<div class="row"><div class="grow"><strong>${e(item.label)}</strong><br><small>${item.clears} mark${item.clears===1?"":"s"} · ${e(date(item.created_at))}</small></div>${btn("Open","plan-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>Plan cleaning from a census with a turned scan.</p>"}</div></section>
+    <section class="card"><h3>Rescan checks</h3><div class="divider-list">${checks.map(item=>`<div class="row"><div class="grow"><strong>${e(item.object==="glass"?"Glass":"Film")} · ${item.counts.remaining} still present</strong><br><small>${item.counts.removed} gone · ${item.counts.unseen} unseen · ${e(date(item.created_at))}</small></div></div>`).join("")||"<p class='soft'>No follow-up scans checked yet.</p>"}</div></section></div></div>`;
 }
 
 function evidencePage() {
@@ -215,7 +274,7 @@ function tilePage() {
   <p>${e(descriptors.join(" · ") || "Registered core section")}</p></div><div class="actions">${btn("Edit specimen","tile-edit","secondary","edit")}
   ${btn("Approve reference","reference-add","secondary","book")}</div></header>
   <nav class="tabs" aria-label="Specimen tools">${tabs.map(([key,label,glyph])=>`<button type="button" class="tab ${state.tab===key?"active":""}" data-do="tile-tab" data-value="${key}">${icon(glyph)}${e(label)}</button>`).join("")}</nav>
-  ${{captures,regions:regionPage,measure:measurements,geometry:geometryPage,evidence:evidencePage}[state.tab]()}`;
+  ${{captures,regions:regionPage,measure:measurements,cleaning:cleaningPage,geometry:geometryPage,evidence:evidencePage}[state.tab]()}`;
 }
 
 function libraryPage() {
@@ -250,8 +309,9 @@ function render() {
 
 async function gatherTile(token=travel) {
   const url=tileUrl();
-  const [results,packets,activity,refs,metrology]=await Promise.all([
+  const [results,packets,activity,refs,metrology,plans,planChecks]=await Promise.all([
     api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),
+    api(url+"/plans"),api(url+"/plan-checks"),
   ]);
   if (token!==travel) return;
   state.results=results.items;
@@ -259,6 +319,14 @@ async function gatherTile(token=travel) {
   state.activity=activity.items;
   state.metrology=metrology.items;
   state.refs=refs.items;
+  state.plans=plans.items;
+  state.planChecks=planChecks.items;
+}
+
+async function openPlan(id) {
+  state.plan=await api(`/api/plans/${id}`);
+  state.tab="cleaning";
+  render();
 }
 
 async function route() {
@@ -270,7 +338,7 @@ async function route() {
     const tile=await api(`/api/specimens/${id}`);
     if (token!==travel) return;
     if (state.tile?.id!==tile.id || state.page!=="tile") {
-      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;
+      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;state.plan=null;
     }
     state.tile=tile;
     await gatherTile(token);
@@ -470,6 +538,55 @@ function lineForm() {
   prepareDrawing([start,end],2);
 }
 
+function filmCornerForm() {
+  const item=currentPhoto();
+  if (!item) throw Error("Select a photo to mark.");
+  const existing=item.film_corners?.corners;
+  modal("Mark the film's four corners",`
+    <p class="notice">Mark the strip's own corners clockwise from its physical upper-left corner. These corners are what carry a mark between a scan and a turned scan; the carrier corners above only fix the glass.</p>
+    ${drawing(item.preview_url,"Photo to mark the film corners")}<div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>
+    ${textField("Corner note","note",item.film_corners?.note||"",'maxlength="240"')}`,
+    "Save film corners",async data=>{
+      if (drawPoints.length!==4) throw Error("Mark exactly four film corners.");
+      await patchTile(`/film-corners/${item.id}`,"PUT",{corners:drawPoints,note:data.get("note")||""},"Film corners saved.",{viewer:"raw"});
+    },true);
+  prepareDrawing(existing||[],4);
+}
+
+function planForm(measurementId) {
+  const record=state.result;
+  if (!record || record.id!==measurementId) throw Error("Open the Dust and scratch census first.");
+  if (!record.metrics.provenance) throw Error("Run this census with a second scan at turned angle before planning.");
+  const known=state.plans?.find(item=>item.measurement_id===measurementId);
+  modal(known?"Replace the adopted cleaning plan":"Plan cleaning",`
+    <p class="notice">Only settled marks are considered. Dismissed and undetermined spots stay out. One object is cleaned this round, and nothing is saved to the specimen itself.</p>
+    ${known?`<p class="soft">Replacing plan ${e(known.id.slice(0,8))} keeps its checks but re-reads placement and review.</p>`:""}`,
+    known?"Replace plan":"Adopt plan",async ()=>{
+      const plan=await api(tileUrl()+"/plans",{method:"POST",body:{measurement_id:measurementId,version:known?.version??1}});
+      commitModal();
+      state.plan={plan,checks:[]};
+      state.tab="cleaning";
+      toast("Cleaning plan adopted.");
+      render();
+    });
+}
+
+function planCheckForm(planId) {
+  const items=(state.results||[]).filter(item=>item.kind==="defects");
+  if (!items.length) throw Error("Run Dust and scratch observations on the later scan first.");
+  modal("Compare after cleaning",`
+    <p class="notice">Choose the single-scan Dust and scratch census made after cleaning at a new angle. Each planned spot is looked for at its place on the cleaned object; a spot the scan cannot see is left unseen.</p>
+    ${selectField("Later census","measurement_id",items.map(item=>option(item.id,`${item.label} · r${item.source_version} · ${date(item.created_at)}`)).join(""))}`,
+    "Check spots",async data=>{
+      const entry=await api(`/api/plans/${planId}/checks`,{method:"POST",body:{version:state.plan.plan.version,measurement_id:data.get("measurement_id")}});
+      commitModal();
+      state.plan={plan:state.plan.plan,checks:[entry,...(state.plan.checks||[])]};
+      await gatherTile();
+      toast("Follow-up check saved.");
+      render();
+    });
+}
+
 function neutralForm() {
   const available=state.tile.regions.filter(item=>item.purpose==="neutral");
   if (!available.length) throw Error("Draw a region marked Neutral color card first.");
@@ -636,13 +753,15 @@ function parsedOptions(data,tool) {
 async function runMeasurement(data) {
   const revision=travel;
   const result=await api(tileUrl()+"/results",{method:"POST",body:{
-    kind:state.tool,photo_id:data.get("photo_id")||null,comparison_id:data.get("comparison_id")||null,
+    kind:state.tool,photo_id:data.get("photo_id")||null,
+    comparison_id:data.get("comparison_id")||null,
     region_id:data.get("region_id")||null,apply_neutral:data.has("apply_neutral"),
     options:parsedOptions(data,state.config.tools[state.tool]),
   }});
   if (revision!==travel) return;
   state.result=result;
   state.layer="overlay";
+  state.tab="measure";
   await gatherTile();
   toast("Measurement saved.");
   render();
@@ -672,6 +791,15 @@ async function doAction(name,target) {
        checkField("Reset the live specimen plane if this is the base","reset_plane"),"Remove photo",async data=>{
        await patchTile("/photos/"+currentPhoto().id,"DELETE",{reset_plane:data.has("reset_plane")},"Photo removed.");
     }),
+    "film-corners":()=>filmCornerForm(),
+    "film-corners-remove":()=>modal("Remove these film corners?",'<p>Saved censuses keep their placement results. New comparisons will need the corners marked again.</p>',"Remove film corners",async ()=>{
+      await patchTile(`/film-corners/${currentPhoto().id}`,"DELETE",{},"Film corners removed.");
+    }),
+    "plan-open":async ()=>{
+      if (id) {await openPlan(id);return;}
+      planForm(target.dataset.measurement);
+    },
+    "plan-check":()=>planCheckForm(id),
     viewer:()=>{state.viewer=value;render();},
     geometry:()=>geometryForm(currentPhoto()?.registration_state==="base"||!state.tile.plane?"base":"registration"),
     "geometry-base":()=>geometryForm("base"),
