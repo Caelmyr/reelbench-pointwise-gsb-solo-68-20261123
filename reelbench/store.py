@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS metrology (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS metrology_tile ON metrology(tile_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS registers (
+    id TEXT PRIMARY KEY,
+    tile_id TEXT NOT NULL REFERENCES specimens(id),
+    reel TEXT NOT NULL,
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS registers_tile ON registers(tile_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -474,3 +483,57 @@ class Store:
                 "SELECT document FROM metrology WHERE tile_id=? ORDER BY rowid DESC LIMIT 50", (chosen,),
             ).fetchall()
             return [json.loads(row["document"]) for row in rows]
+
+    def _register(self, conn, identifier):
+        chosen = identity(identifier, "Frame register ID")
+        row = conn.execute("SELECT document FROM registers WHERE id=?", (chosen,)).fetchone()
+        return artifact_row(row, "Frame register")
+
+    def register(self, identifier):
+        with self.connect() as conn:
+            return self._register(conn, identifier)
+
+    def registers(self, tile_id=None):
+        with self.connect() as conn:
+            if tile_id is not None:
+                self._tile(conn, identity(tile_id, "Specimen ID"))
+                rows = conn.execute(
+                    "SELECT document FROM registers WHERE tile_id=? ORDER BY created_at DESC, rowid DESC",
+                    (tile_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT document FROM registers ORDER BY created_at DESC, rowid DESC LIMIT 250",
+                ).fetchall()
+            return [json.loads(row["document"]) for row in rows]
+
+    def add_register(self, fields):
+        now = timestamp()
+        register = {
+            **fields,
+            "id": fields.get("id") or make_id(),
+            "version": 1,
+            "created_at": fields.get("created_at") or now,
+            "updated_at": now,
+        }
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                "INSERT INTO registers(id,tile_id,reel,document,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                (register["id"], register["tile_id"], register["reel"], document(register), now, now),
+            )
+            event(conn, register["tile_id"], "register", f"Opened the frame register: {register['title']}")
+        return register
+
+    def update_register(self, identifier, expected_version, transform, message):
+        with self.transaction(write=True) as conn:
+            register = self._register(conn, identifier)
+            self.require_version(register, expected_version)
+            transform(register)
+            register["version"] += 1
+            register["updated_at"] = timestamp()
+            conn.execute(
+                "UPDATE registers SET document=?,updated_at=? WHERE id=?",
+                (document(register), register["updated_at"], register["id"]),
+            )
+            event(conn, register["tile_id"], "register", message)
+            return register

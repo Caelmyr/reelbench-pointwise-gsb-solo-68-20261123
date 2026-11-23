@@ -13,6 +13,7 @@ from .evidence import (
     create_evidence,
     evidence_zip,
     filename_stem,
+    register_table,
     result_metrics_table,
     specimen_html,
     study_table,
@@ -42,6 +43,26 @@ from .model import (
 )
 from .parameters import TOOLS
 from .quality import quality_manifest
+from .register import (
+    attach_segment,
+    available_candidates,
+    confirm_whole,
+    create_register,
+    deliver,
+    entry_artifact,
+    entry_scan_image,
+    gate_artifact,
+    gate_surveys,
+    merge_entries,
+    present_register,
+    registers_for_result,
+    resolve_overlap,
+    segment_artifact,
+    separate_entries,
+    summarize_register,
+    undo_decision,
+    undo_join,
+)
 from .photos import png_bytes
 from .review import parse_reviews, review_selection, save_reviews
 from .store import Store
@@ -256,6 +277,14 @@ def register_measurements(api, store, heavy):
         digest = data["metrics"].get("reference_image") if chosen == "reference" else data["pictures"][chosen]
         return png_blob(store, digest)
 
+    @api.get("/results/<measurement_id>/register")
+    def measurement_register(measurement_id):
+        record = store.result(measurement_id)
+        if record["kind"] != "gate":
+            raise InputError("Only a Frame gate survey can join a frame register.")
+        found = registers_for_result(store, record["id"])
+        return jsonify({"register": summarize_register(found) if found else None})
+
     @api.get("/results/<measurement_id>/metrics.csv")
     def measurement_csv(measurement_id):
         data = store.result(measurement_id)
@@ -427,6 +456,101 @@ def register_desks(api, store, heavy):
         return binary_response(artifact_json(record), "application/json", name + ".json")
 
 
+def register_rolls(api, store, heavy):
+    @api.get("/registers")
+    def register_list():
+        return jsonify({"items": [summarize_register(item) for item in store.registers()]})
+
+    @api.get("/registers/candidates")
+    def register_candidates():
+        reel = string(request.args.get("reel"), "Reel label", maximum=80, required=False)
+        return jsonify({"items": gate_surveys(store, reel or None)})
+
+    @api.get("/registers/<register_id>/candidates")
+    def register_open_candidates(register_id):
+        return jsonify({"items": available_candidates(store, store.register(register_id))})
+
+    @api.get("/specimens/<specimen_id>/registers")
+    def specimen_registers(specimen_id):
+        return jsonify({"items": [summarize_register(item) for item in store.registers(specimen_id)]})
+
+    @api.post("/registers")
+    def register_create():
+        with heavy:
+            record = create_register(store, json_request())
+        return jsonify(present_register(record)), 201
+
+    @api.get("/registers/<register_id>")
+    def register_show(register_id):
+        return jsonify(present_register(store.register(register_id)))
+
+    @api.post("/registers/<register_id>/segments")
+    def register_segment(register_id):
+        with heavy:
+            record = attach_segment(store, register_id, json_request())
+        return jsonify(present_register(record))
+
+    @api.post("/registers/<register_id>/join")
+    def register_join(register_id):
+        with heavy:
+            record = merge_entries(store, register_id, json_request())
+        return jsonify(present_register(record))
+
+    @api.post("/registers/<register_id>/whole")
+    def register_whole(register_id):
+        record = confirm_whole(store, register_id, json_request())
+        return jsonify(present_register(record))
+
+    @api.post("/registers/<register_id>/undo-decision")
+    def register_undo_decision(register_id):
+        record = undo_decision(store, register_id, json_request())
+        return jsonify(present_register(record))
+
+    @api.post("/registers/<register_id>/separate")
+    def register_separate(register_id):
+        record = separate_entries(store, register_id, json_request())
+        return jsonify(present_register(record))
+
+    @api.post("/registers/<register_id>/unjoin")
+    def register_unjoin(register_id):
+        record = undo_join(store, register_id, json_request())
+        return jsonify(present_register(record))
+
+    @api.post("/registers/<register_id>/overlap")
+    def register_overlap(register_id):
+        record = resolve_overlap(store, register_id, json_request())
+        return jsonify(present_register(record))
+
+    @api.post("/registers/<register_id>/deliver")
+    def register_deliver(register_id):
+        record = deliver(store, register_id, json_request())
+        return jsonify(present_register(record))
+
+    @api.get("/registers/<register_id>/entries/<entry_id>/frame.png")
+    def register_entry_frame(register_id, entry_id):
+        return png_blob(store, entry_artifact(store, register_id, entry_id))
+
+    @api.get("/registers/<register_id>/entries/<entry_id>/scan.png")
+    def register_entry_scan(register_id, entry_id):
+        with heavy:
+            image = entry_scan_image(store, register_id, entry_id)
+        return image_response(image)
+
+    @api.get("/registers/<register_id>/segments/<segment_id>/image.png")
+    def register_segment_image(register_id, segment_id):
+        return png_blob(store, segment_artifact(store, register_id, segment_id))
+
+    @api.get("/registers/<register_id>/gates/<segment_id>/<int:gate_index>/crop.png")
+    def register_gate_crop(register_id, segment_id, gate_index):
+        return png_blob(store, gate_artifact(store, register_id, segment_id, gate_index))
+
+    @api.get("/registers/<register_id>/table.csv")
+    def register_csv(register_id):
+        record = store.register(register_id)
+        name = filename_stem(record["title"], "frame-register")
+        return binary_response(register_table(record), "text/csv", name + ".csv")
+
+
 def register_training(api, store, heavy):
     @api.get("/training/hero.png")
     def synthetic_thumbnail():
@@ -507,5 +631,6 @@ def create_app(data_dir=None):
     register_measurements(api, store, heavy)
     register_artifacts(api, store, heavy)
     register_desks(api, store, heavy)
+    register_rolls(api, store, heavy)
     app.register_blueprint(api)
     return app

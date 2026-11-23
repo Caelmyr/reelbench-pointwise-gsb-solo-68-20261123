@@ -1,10 +1,12 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
+import {attachForm,deliverForm,entryPanel,joinForm,newRegisterForm,overlapForm,registerList,registerPage} from "./registers.js";
 
-const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
+const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:"",registers:[],register:null,registerEntry:null,registerMarks:null};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
+  ["registers","Frame registers","frame"],
   ["references","Reference library","book"],
   ["studies","Reel studies","plot"],
   ["received","Received evidence","archive"],
@@ -22,6 +24,7 @@ let drawPoints=[];
 let drawLimit=0;
 let currentForm=null;
 let reviewUploads=[];
+let pendingPhoto=null;
 
 function toast(message, isError=false) {
   clearTimeout(toastTimer);
@@ -34,12 +37,14 @@ function toast(message, isError=false) {
 function chrome() {
   q("#rail").innerHTML=`<a href="#collection" class="brand"><span class="mark">${icon("logo")}</span><span><strong>ReelBench</strong><small>Film scan archive</small></span></a>
     <p class="nav-label">Studio</p><nav aria-label="Studio navigation">
-    ${nav.map(([key,label,glyph])=>`<a class="nav-link ${(state.page==="tile"?"collection":state.page)===key?"active":""}" href="#${key}">${icon(glyph)}${e(label)}</a>`).join("")}</nav>
+    ${nav.map(([key,label,glyph])=>`<a class="nav-link ${(state.page==="tile"?"collection":state.page==="registers"?"registers":state.page)===key?"active":""}" href="#${key}">${icon(glyph)}${e(label)}</a>`).join("")}</nav>
     <footer><span class="status-mark"></span>Local workspace</footer>`;
   const crumb=state.page==="tile"
     ? `<a href="#collection">Specimens</a><span aria-hidden="true">/</span><strong>${e(state.tile?.name || "Specimen")}</strong>`
-    : `<strong>${e(nav.find(([key])=>key===state.page)?.[1]||"Specimens")}</strong>`;
-  q("#mast").innerHTML=`<div class="breadcrumb">${crumb}</div><div class="actions">${state.page==="tile" ? btn("Add photo","photo-add","primary","plus") : btn("New specimen","tile-new","primary","plus")}</div>`;
+    : state.page==="registers"&&state.register
+      ? `<a href="#registers">Frame registers</a><span aria-hidden="true">/</span><strong>${e(state.register.title)}</strong>`
+      : `<strong>${e(nav.find(([key])=>key===state.page)?.[1]||"Specimens")}</strong>`;
+  q("#mast").innerHTML=`<div class="breadcrumb">${crumb}</div><div class="actions">${state.page==="tile" ? btn("Add photo","photo-add","primary","plus") : state.page==="registers" ? btn("Start a register","register-new","primary","plus") : btn("New specimen","tile-new","primary","plus")}</div>`;
 }
 
 function cardTiles() {
@@ -245,7 +250,20 @@ function studyPage() {
 
 function render() {
   chrome();
-  q("#main").innerHTML={collection,tile:tilePage,references:libraryPage,studies:studyPage,received:receivedPage}[state.page]();
+  q("#main").innerHTML={collection,tile:tilePage,registers:registersPage,references:libraryPage,studies:studyPage,received:receivedPage}[state.page]();
+}
+
+function registersPage() {
+  if (!state.register) return registerList(state.registers);
+  return registerPage(state.register,state.registerEntry);
+}
+
+async function openRegister(id) {
+  state.register=await api("/api/registers/"+id);
+  state.registerEntry=null;
+  state.registerMarks=null;
+  state.page="registers";
+  render();
 }
 
 async function gatherTile(token=travel) {
@@ -273,6 +291,12 @@ async function route() {
       state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;
     }
     state.tile=tile;
+    if (pendingPhoto) {
+      state.capture=pendingPhoto;
+      state.tab="captures";
+      state.viewer="raw";
+      pendingPhoto=null;
+    }
     await gatherTile(token);
     if (token===travel) {state.page="tile";render();}
     return;
@@ -280,6 +304,29 @@ async function route() {
   if (hash==="references") {
     const refs=await api("/api/library");
     if (token===travel) {state.refs=refs.items;state.page="references";render();}
+    return;
+  }
+  if (hash==="registers") {
+    const registers=await api("/api/registers");
+    if (token!==travel) return;
+    state.registers=registers.items;
+    state.page="registers";
+    state.register=null;
+    state.registerEntry=null;
+    render();
+    return;
+  }
+  if (hash.startsWith("register:")) {
+    const id=hash.slice(9);
+    if (!/^[a-f0-9]{24}$/.test(id)) throw Error("This frame register link is invalid.");
+    const [register,registers]=await Promise.all([api("/api/registers/"+id),api("/api/registers")]);
+    if (token!==travel) return;
+    state.register=register;
+    state.registers=registers.items;
+    state.registerEntry=null;
+    state.registerMarks=null;
+    state.page="registers";
+    render();
     return;
   }
   if (hash==="studies") {
@@ -569,6 +616,208 @@ function qualityForm() {
     });
 }
 
+async function registerMutate(path,body) {
+  state.register=await api(`/api/registers/${state.register.id}/${path}`,{method:"POST",body});
+  state.registers=(await api("/api/registers")).items;
+  if (state.registerEntry) state.registerEntry=state.register.active_entries.find(item=>item.id===state.registerEntry.id)||null;
+  return state.register;
+}
+
+async function registerNewForm() {
+  const [candidates,registers]=await Promise.all([api("/api/registers/candidates"),api("/api/registers")]);
+  const reels=[];
+  const seen=new Set();
+  for (const item of candidates.items) {
+    const key=item.reel||"";
+    if (seen.has(key)) continue;
+    seen.add(key);
+    reels.push({reel:key});
+  }
+  if (!candidates.items.length) throw Error("Run Frame gate survey on a registered scan before starting a frame register.");
+  modal("Start a frame register",newRegisterForm(candidates.items,reels),"Create register",async data=>{
+    const resultId=data.get("result_id");
+    const chosen=candidates.items.find(item=>item.result_id===resultId);
+    if (!chosen) throw Error("Choose the Frame gate survey of the first scan.");
+    const created=await api("/api/registers",{method:"POST",body:{
+      tile_id:chosen.specimen_id,result_id:resultId,title:data.get("title")||`${chosen.specimen_name} frame numbers`,reel:data.get("reel"),
+    }});
+    state.registers=(await api("/api/registers")).items;
+    commitModal();
+    location.hash="register:"+created.id;
+    toast("Frame register started.");
+  },true);
+}
+
+async function registerAttachForm() {
+  const candidates=await api(`/api/registers/${state.register.id}/candidates`);
+  if (!candidates.items.length) {
+    throw Error("No unused Frame gate survey is available for this reel. Run Frame gate survey on the next scan first.");
+  }
+  modal("Attach the next scan",attachForm(candidates.items,state.register.reel),'Attach scan',async data=>{
+    const resultId=data.get("result_id");
+    if (!resultId) throw Error("Choose the scan to attach.");
+    await registerMutate("segments",{version:state.register.version,result_id:resultId,note:data.get("note")||""});
+    commitModal();
+    toast("Scan attached. Pair the pictures both scans show.");
+    render();
+  },true);
+}
+
+async function registerJoinForm() {
+  const open=state.register.junctions.find(item=>item.status==="open");
+  if (!open) throw Error("Every splice in this register is already reconciled.");
+  state.registerMarks={pairs:[],awaiting:"earlier",pending:null};
+  const earlierEntries=open.earlier_tail||[];
+  const laterEntries=open.later_head||[];
+  const firstUnpaired=(list)=>{
+    const single=list.find(entry=>entry.observations.length===1);
+    return (single||list[0])?.id||null;
+  };
+  const earlierId=firstUnpaired(earlierEntries),laterId=firstUnpaired(laterEntries);
+  if (earlierId) state.registerMarks.first=earlierId;
+  if (laterId) state.registerMarks.second=laterId;
+  modal("Join two views of one picture",joinForm(state.register,open,state.registerMarks),"Join pictures",async data=>{
+    const first=data.get("first_id"),second=data.get("second_id");
+    if (!first||!second) throw Error("Choose a picture from each scan.");
+    if (!state.registerMarks?.pairs?.length) throw Error("Mark at least two matching picture details.");
+    await registerMutate("join",{
+      version:state.register.version,first_id:first,second_id:second,
+      landmarks:state.registerMarks.pairs,clearer_marks:data.get("clearer_marks")||"equal",
+      note:data.get("note")||"",
+    });
+    state.registerMarks=null;
+    commitModal();
+    toast("The two views are recorded as one picture.");
+    render();
+    const still=state.register.junctions.find(item=>item.status==="open");
+    if (still&&(still.earlier_tail||[]).some(entry=>entry.observations.length===1)) {
+      await registerJoinForm();
+    }
+  },true);
+  const holder=q("#dialog-form");
+  const hint=document.createElement("p");
+  hint.className="notice";
+  hint.id="mark-hint";
+  hint.textContent="Next: click a detail in the earlier view.";
+  holder.querySelector(".dialog-controls").before(hint);
+}
+
+function chosenEntryId(name) {
+  const input=q(`#dialog-form input[name="${name}"]:checked`);
+  return input?.value || null;
+}
+
+function observationCrop(entry,side) {
+  if (!entry?.observations?.length) return "";
+  const observation=entry.observations.find(item=>item.segment_id===entry.observations[0].segment_id)||entry.observations[0];
+  return `/api/registers/${state.register.id}/gates/${observation.segment_id}/${observation.gate_index}/crop.png`;
+}
+
+function syncJoinViews() {
+  if (!state.register||!state.registerMarks) return;
+  const earlierId=chosenEntryId("first_id"),laterId=chosenEntryId("second_id");
+  if (!earlierId||!laterId) return;
+  if (state.registerMarks.first===earlierId&&state.registerMarks.second===laterId) return;
+  state.registerMarks={pairs:[],awaiting:"earlier",pending:null,first:earlierId,second:laterId};
+  for (const [side,entryId] of [["earlier",earlierId],["later",laterId]]) {
+    const entry=state.register.active_entries.find(item=>item.id===entryId);
+    const image=q(`[data-mark="${side}"] img`);
+    if (!image) continue;
+    image.src=observationCrop(entry,side);
+    const artist=q(`#mark-${side}`);
+    if (artist) {artist.innerHTML="";artist.dataset.points="";}
+  }
+  const hint=q("#mark-hint");
+  if (hint) hint.textContent="Next: click a detail in the earlier view.";
+  const list=q("#join-marks");
+  if (list) list.innerHTML="<p class='soft'>No matching detail marked yet. Click a detail in the earlier view, then the same detail in the later view.</p>";
+}
+
+function registerMarkClick(element,event) {
+  if (!state.registerMarks) return false;
+  const side=element.dataset.mark;
+  if (side!==state.registerMarks.awaiting) return false;
+  const rect=element.getBoundingClientRect();
+  const point=[Number(Math.min(1,Math.max(0,(event.clientX-rect.left)/rect.width)).toFixed(6)),
+               Number(Math.min(1,Math.max(0,(event.clientY-rect.top)/rect.height)).toFixed(6))];
+  if (side==="earlier") {
+    state.registerMarks.pending=point;
+    state.registerMarks.awaiting="later";
+    drawMark("earlier",point,true);
+    q("#mark-hint").textContent="Next: click the same detail in the later view.";
+  } else {
+    if (!state.registerMarks.pending) return false;
+    state.registerMarks.pairs.push({first:state.registerMarks.pending,second:point});
+    state.registerMarks.pending=null;
+    state.registerMarks.awaiting="earlier";
+    drawMark("earlier",state.registerMarks.pairs.at(-1).first,false);
+    drawMark("later",point,false);
+    q("#mark-hint").textContent=`${state.registerMarks.pairs.length} matching detail(s) marked. Add another, or save the join.`;
+    const list=q("#join-marks");
+    if (list) list.innerHTML=state.registerMarks.pairs.map((pair,index)=>`<div class="row"><div class="grow"><strong>Detail ${index+1}</strong><br><small>earlier ${pair.first.map(value=>n(value,2)).join(", ")} · later ${pair.second.map(value=>n(value,2)).join(", ")}</small></div></div>`).join("");
+  }
+  return true;
+}
+
+function drawMark(side,point,pending) {
+  const artist=q(`#mark-${side}`);
+  if (!artist) return;
+  const existing=artist.dataset.points?JSON.parse(artist.dataset.points):[];
+  existing.push([point[0]*1000,point[1]*1000,pending]);
+  artist.dataset.points=JSON.stringify(existing);
+  artist.innerHTML=existing.map(([x,y,draft]) => `<circle cx="${x}" cy="${y}" r="${draft?12:10}" class="draw-point"/>`).join("");
+}
+
+async function registerOverlapForm() {
+  const open=state.register.junctions.find(item=>item.status==="open");
+  if (!open) throw Error("Every splice in this register is already reconciled.");
+  modal("Record the last repeated picture",overlapForm(state.register,open),"Close the overlap",async data=>{
+    const anchor=data.get("anchor_entry_id");
+    if (!anchor) throw Error("Choose the last picture both scans show.");
+    await registerMutate("overlap",{
+      version:state.register.version,earlier_segment_id:open.earlier_segment_id,later_segment_id:open.later_segment_id,
+      mode:"repeat_through",anchor_entry_id:anchor,note:data.get("note")||"",
+    });
+    commitModal();
+    toast("Overlap closed. Numbering continues after the joined picture.");
+    render();
+  },true);
+}
+
+async function registerAdjacentForm() {
+  const open=state.register.junctions.find(item=>item.status==="open");
+  if (!open) throw Error("Every splice in this register is already reconciled.");
+  const earlier=state.register.segments.find(item=>item.id===open.earlier_segment_id);
+  const later=state.register.segments.find(item=>item.id===open.later_segment_id);
+  modal("These two scans share no picture",`<p class="notice">Use this only when the two scans butt together without repeating a picture. The register then renumbers straight through the splice.</p>
+    <p>${e(earlier?.photo.name||"Earlier scan")} ends, and ${e(later?.photo.name||"Later scan")} begins at the next picture.</p>
+    ${areaField("Overlap note","note","",500)}`,"Record as adjacent",async data=>{
+    await registerMutate("overlap",{
+      version:state.register.version,earlier_segment_id:open.earlier_segment_id,later_segment_id:open.later_segment_id,
+      mode:"adjacent",note:data.get("note")||"",
+    });
+    commitModal();
+    toast("Splice recorded as adjacent.");
+    render();
+  });
+}
+
+async function registerDeliverForm() {
+  if (!state.register.numbered_through) throw Error("Number the pictures before delivering them.");
+  if (state.register.sealed_through>=state.register.numbered_through) throw Error("Every numbered frame has already been delivered.");
+  modal("Deliver frame numbers",deliverForm(state.register),"Record delivery",async data=>{
+    await registerMutate("deliver",{
+      version:state.register.version,
+      through:Number(data.get("through")),
+      recipient:data.get("recipient"),
+      note:data.get("note")||"",
+    });
+    commitModal();
+    toast("Delivery recorded.");
+    render();
+  });
+}
+
 function pinForm() {
   if (!state.results.length) throw Error("Run a measurement before pinning evidence.");
   const rows=state.results.map(item=>`<label class="row field check"><input type="checkbox" name="result_id" value="${item.id}"${state.result?.id===item.id?" checked":""}>
@@ -734,12 +983,74 @@ async function doAction(name,target) {
       render();
     },
     "result-layer":()=>{state.layer=value;render();},
+    "result-register":async ()=>{
+      const found=await api(`/api/results/${id}/register`);
+      if (found.register) {
+        location.hash="register:"+found.register.id;
+        return;
+      }
+      const result=await api("/api/results/"+id);
+      modal("Open a frame register",'<p class="soft">This Frame gate survey is not in a register yet. Start one with this survey as the first scan, or attach it to an existing register of the same reel.</p>'+
+        textField("Register title","title",`${result.provenance.specimen.name} frame numbers`,"maxlength=\"100\"")+
+        textField("Reel label","reel",result.provenance.specimen.batch||"","maxlength=\"80\" required")+
+        '<p class="soft">To attach this survey to an existing register, open that register and choose Attach scan.</p>',
+        "Start register",async data=>{
+          const created=await api("/api/registers",{method:"POST",body:{
+            tile_id:result.tile_id,result_id:result.id,title:data.get("title"),reel:data.get("reel"),
+          }});
+          state.registers=(await api("/api/registers")).items;
+          commitModal();
+          toast("Frame register started.");
+          location.hash="register:"+created.id;
+        });
+    },
     "defect-choice":async ()=>{
       state.result=await api(`/api/results/${state.result.id}/observations/${marker}`,{method:"PUT",body:{version:state.result.version,decision:value,notes:""}});
       toast("Observation reviewed.");
       render();
     },
     pin:pinForm,
+    "register-open":()=>{location.hash="register:"+id;},
+    "register-list":()=>{location.hash="registers";},
+    "register-entry":()=>{state.registerEntry=state.register.active_entries.find(item=>item.id===id)||null;render();},
+    "register-scan":()=>{pendingPhoto=target.dataset.photo||null;location.hash="tile:"+target.dataset.specimen;},
+    "register-new":()=>registerNewForm(),
+    "register-attach":()=>registerAttachForm(),
+    "register-join":()=>registerJoinForm(),
+    "register-torn-join":async ()=>{
+      const a=target.dataset.a,b=target.dataset.b;
+      await registerMutate("join",{version:state.register.version,first_id:a,second_id:b,note:"One picture split by a broken scan edge."});
+      toast("The two views are now one picture.");
+      render();
+    },
+    "register-separate":async ()=>{
+      const a=target.dataset.a,b=target.dataset.b;
+      await registerMutate("separate",{version:state.register.version,first_id:a,second_id:b,note:"Two separate pictures at a broken edge."});
+      toast("The two spans are recorded as separate pictures.");
+      render();
+    },
+    "register-overlap":()=>registerOverlapForm(),
+    "register-adjacent":()=>registerAdjacentForm(),
+    "register-whole":()=>{
+      const entry=state.register.active_entries.find(item=>item.id===id);
+      modal("Record a whole picture",`<p class="notice">Use this only when both ends of the picture are actually visible, or when the picture reaches the outer end of the reel. The number then depends on this record.</p>
+        <p class="soft">${e(entry?.reason||"")}</p>${areaField("What the scan shows","note","",500)}`,
+        "Record whole picture",async data=>{
+          await registerMutate("whole",{version:state.register.version,entry_id:id,note:data.get("note")||""});
+          commitModal();
+          toast("Picture recorded as a whole picture.");
+          render();
+        });
+    },
+    "register-undo-decision":()=>{
+      modal("Clear this picture decision?",'<p>Any numbers that depend on this decision return to blank.</p>',"Clear decision",async ()=>{
+        await registerMutate("undo-decision",{version:state.register.version,entry_id:id});
+        commitModal();
+        toast("Decision cleared.");
+        render();
+      });
+    },
+    "register-deliver":()=>registerDeliverForm(),
     "study-add":studyForm,
     "study-open":()=>{state.study=state.studies.find(item=>item.id===id);render();},
     close:commitModal,
@@ -770,6 +1081,11 @@ async function runAction(target) {
 document.addEventListener("click",event=>{
   const target=event.target.closest("[data-do]");
   if (target) {void runAction(target);return;}
+  const marking=event.target.closest("[data-mark]");
+  if (marking && dialog.open) {
+    if (registerMarkClick(marking,event)) event.preventDefault();
+    return;
+  }
   const drawing=event.target.closest("#draw-stage");
   if (drawing && drawPoints.length<drawLimit) {
     const rect=drawing.getBoundingClientRect();
@@ -817,10 +1133,12 @@ document.addEventListener("change",event=>{
     q("#field-kind")?.focus();
   }
   if (event.target.id==="field-study_kind") studyOptions(event.target.value);
+  if (["first_id","second_id"].includes(event.target.name) && dialog.open) syncJoinViews();
 });
 
 dialog.addEventListener("close",()=>{
   qa("[data-blob]",dialog).forEach(el=>URL.revokeObjectURL(el.dataset.blob));
+  state.registerMarks=null;
 });
 window.addEventListener("hashchange",()=>{void route().catch(displayFault);});
 api("/api/configuration").then(config=>{state.config=config;return route();}).catch(displayFault);

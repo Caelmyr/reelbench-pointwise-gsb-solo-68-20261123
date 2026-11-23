@@ -123,6 +123,39 @@ def study_table(report):
     return csv_lines(columns, ([item[key] for key in columns] for item in report["rows"]))
 
 
+def register_table(register):
+    segments = {segment["id"]: segment for segment in register["segments"]}
+    columns = (
+        "reel", "frame", "state", "views", "adopted_scan", "adopted_photo", "adopted_gate",
+        "condition", "completeness", "decision", "reason", "note",
+    )
+    rows = []
+    for entry in register["entries"]:
+        if not entry["active"]:
+            continue
+        adopted = entry.get("adopted") or {}
+        views = "; ".join(
+            f"{segments[item['segment_id']]['photo']['name']} gate {item['gate_index']}"
+            if item["segment_id"] in segments else f"gate {item['gate_index']}"
+            for item in entry["observations"]
+        )
+        rows.append([
+            register["reel"],
+            entry["number"] if entry["number"] is not None else "",
+            entry["state"],
+            views,
+            segments.get(adopted.get("segment_id"), {}).get("photo", {}).get("name", ""),
+            adopted.get("photo_name", ""),
+            adopted.get("gate_index", ""),
+            adopted.get("condition", ""),
+            adopted.get("completeness", ""),
+            entry["decision"],
+            entry["unresolved_reason"],
+            entry["note"],
+        ])
+    return csv_lines(columns, rows)
+
+
 def source_index(tile, results):
     originals = {}
     for result in results:

@@ -166,6 +166,11 @@ function details(record) {
   return render(record.kind==="defects" ? record : record.metrics);
 }
 
+function registerLink(record) {
+  if (record.kind !== "gate") return "";
+  return btn("Frame register", "result-register", "secondary", "frame", `data-id="${record.id}"`);
+}
+
 export function resultCard(record, layer, currentRevision) {
   const path=`/api/results/${record.id}`;
   const available = ["overlay","source",...(record.pictures.paired ? ["paired"] : []),...(record.metrics.reference_image ? ["reference"] : [])];
@@ -184,7 +189,7 @@ export function resultCard(record, layer, currentRevision) {
       ["Clipped pixels",record.support.clipped_pixels],
       ["Neutral correction",record.provenance.neutral_card?.before_swatch || "Uncorrected"],
     ])}</details>
-    <div class="actions">${link("Metrics CSV",path+"/metrics.csv","secondary","download")}${btn("Pin evidence","pin", "primary","archive")}</div>
+    <div class="actions">${link("Metrics CSV",path+"/metrics.csv","secondary","download")}${registerLink(record)}${btn("Pin evidence","pin", "primary","archive")}</div>
   </section>`;
 }
 
