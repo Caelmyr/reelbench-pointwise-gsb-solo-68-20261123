@@ -96,9 +96,24 @@ def result_metrics_table(record):
         columns = ("dot", "area_px", "area_mm2", "axis_ratio", "major_angle_deg", "center")
         rows = ([item[key] for key in columns] for item in metrics["rows"])
     elif kind == "weave":
-        fields = ("family", "angle_degrees", "pitch", "peak_to_background")
-        columns = ("unit", *fields)
-        rows = ([metrics["unit"], *(item[key] for key in fields)] for item in metrics["rows"])
+        if "segments" in metrics:
+            columns = (
+                "unit", "side", "source_photo_id", "source_name", "status", "family",
+                "angle_degrees", "pitch", "peak_to_background", "pixels", "bounds",
+            )
+            rows = (
+                [
+                    metrics["unit"], segment["side"], segment["source_photo_id"], segment["source_name"],
+                    segment["status"], item["family"], item["angle_degrees"], item["pitch"],
+                    item["peak_to_background"], segment["pixels"], segment["bounds"],
+                ]
+                for segment in metrics["segments"]
+                for item in segment["rows"]
+            )
+        else:
+            fields = ("family", "angle_degrees", "pitch", "peak_to_background")
+            columns = ("unit", *fields)
+            rows = ([metrics["unit"], *(item[key] for key in fields)] for item in metrics["rows"])
     elif kind == "aggregate":
         fields = ("rank", "registered_pixels", "normalized_center", "contrast", "bounding_width", "bounding_height")
         columns = ("unit", *fields)

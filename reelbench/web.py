@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from pathlib import Path
 from threading import BoundedSemaphore
@@ -7,6 +8,7 @@ from flask import Blueprint, Flask, Response, jsonify, request, send_file, send_
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
 from .analysis import approve_reference, evaluate
+from .composite import build_composite
 from .demo import load_training, preview_photo
 from .evidence import (
     artifact_json,
@@ -91,6 +93,21 @@ def png_blob(store, digest):
     if digest is None:
         raise MissingError("No image exists for this selected layer.")
     return send_file(store.blobs.require(digest), mimetype="image/png", conditional=True, max_age=48 * 3600)
+
+
+def mark_parameter(value):
+    if value is None:
+        return None
+    parts = value.split(",")
+    if len(parts) != 4:
+        raise InputError("A mark needs four comma-separated fractions.")
+    try:
+        box = [float(part) for part in parts]
+    except ValueError as error:
+        raise InputError("A mark needs four comma-separated fractions.") from error
+    if any(not math.isfinite(item) or item < 0 or item > 1 for item in box) or box[0] >= box[2] or box[1] >= box[3]:
+        raise InputError("Mark fractions must satisfy x0 < x1 and y0 < y1 within the plane.")
+    return box
 
 
 def register_specimens(api, store, heavy):
@@ -181,11 +198,18 @@ def register_specimens(api, store, heavy):
 
     @api.get("/specimens/<specimen_id>/viewer/<photo_id>")
     def viewer(specimen_id, photo_id):
-        selected = enumeration(request.args.get("layer", "raw"), ("raw", "regions", "corrected"), "Viewer layer")
+        selected = enumeration(request.args.get("layer", "raw"), ("raw", "regions", "corrected", "seam"), "Viewer layer")
+        mark = mark_parameter(request.args.get("mark"))
         tile = store.tile(specimen_id)
         with heavy:
-            image = side_preview(store, tile, identity(photo_id, "Photo ID"), selected)
+            image = side_preview(store, tile, identity(photo_id, "Photo ID"), selected, mark)
         return image_response(image)
+
+    @api.post("/specimens/<specimen_id>/composites")
+    def composite_make(specimen_id):
+        with heavy:
+            tile, summary = build_composite(store, specimen_id, json_request())
+        return jsonify({**present_tile(tile), "composite_summary": summary}), 201
 
     @api.post("/specimens/<specimen_id>/viewer/pair")
     def viewer_pair(specimen_id):

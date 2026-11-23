@@ -92,6 +92,19 @@ def specimen_provenance(tile):
     }
 
 
+def composite_provenance(photo):
+    composite = photo.get("composite")
+    if not composite:
+        return None
+    return {
+        "sources": composite["sources"],
+        "lines": composite["lines"],
+        "stats": composite["stats"],
+        "rule": composite["rule"],
+        "excluded_regions": composite["excluded_regions"],
+    }
+
+
 def support_digest(frame, area):
     total = int(np.count_nonzero(area))
     available = area & frame.valid
@@ -289,6 +302,7 @@ def evaluate(store, tile_id, payload):
             "specimen": specimen_provenance(tile),
             "photo": capture_provenance(frame),
             "paired_photo": capture_provenance(pair) if pair else None,
+            "composite": composite_provenance(frame.photo),
             "region": region,
             "exclusions": [item for item in tile["regions"] if item["purpose"] == "ignore"],
             "neutral_card": correction,

@@ -10,6 +10,7 @@ from .geometry import (
 )
 from .model import (
     ConflictError,
+    DERIVED_ROLES,
     InputError,
     MAX_REGIONS,
     MAX_TILE_IMAGES,
@@ -91,6 +92,8 @@ def edit_specimen(store, identifier, payload):
 
 def import_photo(store, tile_id, expected, binary, filename, role, note):
     validated_role = enumeration(role, ROLE_LABELS, "Lighting role")
+    if validated_role in DERIVED_ROLES:
+        raise InputError("A focus composite is built from registered scans, not uploaded.")
     validated_note = string(note, "Capture notes", maximum=500, required=False)
     current = store.tile(tile_id)
     store.require_version(current, expected)
@@ -116,6 +119,8 @@ def edit_photo(store, tile_id, capture_id, payload):
     def change(tile):
         source = match_slot(tile["photos"], capture_id, "photo")
         revised = enumeration(payload.get("role", source["role"]), ROLE_LABELS, "Lighting role")
+        if revised != source["role"] and (revised in DERIVED_ROLES or source["role"] in DERIVED_ROLES):
+            raise InputError("A focus composite keeps its own derived role.")
         if any(
             item["id"] != capture_id
             and item["source_digest"] == source["source_digest"]
@@ -183,6 +188,8 @@ def save_plane(store, tile_id, payload):
 
     def change(tile):
         photo = match_slot(tile["photos"], photo_id, "photo")
+        if photo["role"] in DERIVED_ROLES:
+            raise InputError("Keep an original scan as the specimen base.")
         size = canvas_dimensions(
             photo, corners,
             tile["width_mm"] if respect_scale else None,
@@ -208,6 +215,9 @@ def save_registration(store, identifier, photo_id, payload):
     homography(DEFAULT_CORNERS, corners)
     current = store.tile(identifier)
     store.require_version(current, expected)
+    photo = match_slot(current["photos"], photo_id, "photo")
+    if photo["role"] in DERIVED_ROLES:
+        raise InputError("A focus composite is already locked to the specimen plane.")
     frame = preview_transform(store, identifier, photo_id, payload, "registration")
     supported = float(frame.valid.mean())
     if supported < 0.15:

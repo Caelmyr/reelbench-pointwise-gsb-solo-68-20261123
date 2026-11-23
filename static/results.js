@@ -14,7 +14,18 @@ export function metricSet(record) {
     color: () => [["Median L*",n(m.median_lab[0])],["Within-plane p90 ΔE",n(m.delta_e_from_tile_median["90"])],["Pixels measured",n(m.pixels,0)]],
     pores: () => [["Closed candidates",m.closed_count],["Truncated candidates",m.truncated_count],["Closed dark area",percent(m.closed_dark_percent)]],
     dots: () => [["Resolved grains",m.dot_count],["Median area (px²)",n(m.median_area_px,2)],["Resolved grain area",percent(m.ink_area_percent)]],
-    weave: () => [["Family A pitch",m.axis_a_pitch==null?"—":`${n(m.axis_a_pitch,3)} ${m.unit}`],["Family B pitch",m.axis_b_pitch==null?"—":`${n(m.axis_b_pitch,3)} ${m.unit}`],["Crossing",m.crossing_angle==null?"—":`${n(m.crossing_angle,1)}°`]],
+    weave: () => {
+      if (m.segments) {
+        const rows=[["Sides measured",`${m.segments.filter(seg=>seg.status==="measured").length} of ${m.segments.length}`]];
+        for (const seg of m.segments) {
+          const tag=seg.side==="left"?"Left":"Right";
+          rows.push([`${tag} · A pitch`,seg.axis_a_pitch==null?"—":`${n(seg.axis_a_pitch,3)} ${m.unit}`]);
+          rows.push([`${tag} · B pitch`,seg.axis_b_pitch==null?"—":`${n(seg.axis_b_pitch,3)} ${m.unit}`]);
+        }
+        return rows;
+      }
+      return [["Family A pitch",m.axis_a_pitch==null?"—":`${n(m.axis_a_pitch,3)} ${m.unit}`],["Family B pitch",m.axis_b_pitch==null?"—":`${n(m.axis_b_pitch,3)} ${m.unit}`],["Crossing",m.crossing_angle==null?"—":`${n(m.crossing_angle,1)}°`]];
+    },
     defects: () => {
       const reviewed = Object.values(record.decisions);
       return [["Observed",m.total_observations],["Confirmed",reviewed.filter(item=>item.decision==="confirm").length],["Dismissed",reviewed.filter(item=>item.decision==="dismiss").length]];
@@ -150,10 +161,28 @@ function filmResultDetail(kind, m) {
   return `${information[kind]()}<p class="plot-note">${e(m.note)}</p>`;
 }
 
+function weaveSegmentDetail(m, record) {
+  const specimen=record.provenance.specimen.id;
+  const cards=m.segments.map(seg=>{
+    const side=seg.side==="left"?"Left":"Right";
+    const range=seg.bounds?seg.bounds.map(value=>n(value,3)).join(", "):"—";
+    const open=seg.source_photo_id&&seg.bounds
+      ?`<div class="actions"><a class="button tiny secondary" target="_blank" rel="noreferrer" href="/api/specimens/${e(specimen)}/viewer/${e(seg.source_photo_id)}?layer=raw&mark=${seg.bounds.join(",")}">View range on source scan</a></div>`
+      :"";
+    return `<h4>${side} side · ${e(seg.source_name || "source scan")}</h4>
+      <p class="plot-note">${seg.status==="measured"
+        ?`Continuous run ${n(seg.pixels,0)} px · measured window ${range}.`
+        :`Left blank — ${e(seg.reason || "no long enough continuous run on this scan.")}`}</p>
+      ${table(["Family","Direction (°)",`Pitch (${m.unit})`,"Peak / background"],seg.rows.map(item=>[item.family,n(item.angle_degrees,2),n(item.pitch,3),n(item.peak_to_background,2)]))}
+      ${open}`;
+  }).join("");
+  return `<h3>Texture per side of the focus boundary</h3><p class="plot-note">${e(m.note)}</p>${cards}`;
+}
+
 function details(record) {
   if (["perforation","gate","sound","density","transport"].includes(record.kind)) return filmResultDetail(record.kind,record.metrics);
   const render = {
-    weave:m=>`<h3>Visible texture families</h3><p class="plot-note">${e(m.note)}</p>${table(["Family","Direction (°)",`Pitch (${m.unit})`,"Peak / background"],m.rows.map(item=>[item.family,n(item.angle_degrees,2),n(item.pitch,3),n(item.peak_to_background,2)]))}`,
+    weave:(m,rec)=>m.segments?weaveSegmentDetail(m,rec):`<h3>Visible texture families</h3><p class="plot-note">${e(m.note)}</p>${table(["Family","Direction (°)",`Pitch (${m.unit})`,"Peak / background"],m.rows.map(item=>[item.family,n(item.angle_degrees,2),n(item.pitch,3),n(item.peak_to_background,2)]))}`,
     pores:m=>`<h3>Opening record</h3><p class="plot-note">${e(m.note)} ${m.features_omitted?`Table retains the largest ${m.rows.length} openings.`:""}</p>
       ${table(["Opening","State","Area (px²)","Area (mm²)","Position"],m.rows.map(r=>[r.id,r.state,r.pixels,n(r.square_mm,4),r.center_normalized.map(value=>n(value,3)).join(", ")]))}`,
     dots:m=>`<h3>Isolated dark grains</h3><p class="plot-note">${e(m.note)}</p>${table(["Grain","Area (px²)","Area (mm²)","Major/minor","Angle (°)"],m.rows.map(r=>[
@@ -163,7 +192,7 @@ function details(record) {
     direction:directionDetail,texture:textureDetail,profile:profileDetail,reference:referenceDetail,craze:crazeDetail,rim:rimDetail,
     marking:markingDetail,joint:jointDetail,aggregate:aggregateDetail,
   }[record.kind];
-  return render(record.kind==="defects" ? record : record.metrics);
+  return render(record.kind==="defects" ? record : record.metrics, record);
 }
 
 export function resultCard(record, layer, currentRevision) {

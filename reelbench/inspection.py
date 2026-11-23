@@ -2,22 +2,39 @@ import numpy as np
 from PIL import ImageDraw
 from scipy import ndimage
 
-from .art import annotated_regions, base_rgba, magnitude_overlay
+from .art import ACCENT, SHADOW, annotated_regions, base_rgba, magnitude_overlay
 from .color import corrected_linear, float_list, linear_lab, quantile_rows
+from .composite import seam_map_picture
 from .defects import gaussian_supported
 from .geometry import active_region, analysis_mask, region_domain, specimen_frame
 from .model import InputError, enumeration, identity, integer, scalar
 from .photos import luminance, uint8_image
 
 
-def side_preview(store, tile, photo_id, layer):
+def mark_rectangle(image, mark):
+    width, height = image.size
+    box = (mark[0] * width - 0.5, mark[1] * height - 0.5, mark[2] * width - 0.5, mark[3] * height - 0.5)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle(box, outline=SHADOW, width=6)
+    draw.rectangle(box, outline=ACCENT, width=2)
+    return image
+
+
+def side_preview(store, tile, photo_id, layer, mark=None):
     frame = specimen_frame(store.blobs, tile, photo_id)
-    if layer == "raw":
-        return base_rgba(frame)
-    corrected, _ = corrected_linear(tile, frame, layer in ("corrected", "regions"))
-    if layer == "regions":
-        return annotated_regions(frame, tile["regions"], corrected)
-    return base_rgba(frame, corrected)
+    if layer == "seam":
+        if not frame.photo.get("composite"):
+            raise InputError("Only a focus composite has a seam map.")
+        image = seam_map_picture(frame, frame.photo["composite"])
+    elif layer == "raw":
+        image = base_rgba(frame)
+    else:
+        corrected, _ = corrected_linear(tile, frame, layer in ("corrected", "regions"))
+        if layer == "regions":
+            image = annotated_regions(frame, tile["regions"], corrected)
+        else:
+            image = base_rgba(frame, corrected)
+    return mark_rectangle(image, mark) if mark else image
 
 
 def cross_edge_mismatch(first, second, common):

@@ -20,6 +20,7 @@ let travel=0;
 let dialogToken=0;
 let drawPoints=[];
 let drawLimit=0;
+let drawMode="polygon";
 let currentForm=null;
 let reviewUploads=[];
 
@@ -79,17 +80,23 @@ function imagesForCapture() {
   const photo=currentPhoto();
   const tile=state.tile;
   if (!photo) return empty("Add a diffuse photograph, then mark the corners of the survey.",btn("Add photo","photo-add","primary","plus"));
+  if (state.viewer==="seam"&&!photo.composite) state.viewer="raw";
   const canvas=photo.registered_url && state.viewer!=="source";
   const illustration=canvas?photo.registered_url+`&layer=${state.viewer}`:photo.preview_url;
   const canModes=Boolean(photo.registered_url);
+  const composite=photo.composite;
   return `<section class="card workspace-viewer">
       <div class="title-row"><h3>${e(photo.role_label)}</h3>${badge(photo.registration_state,canModes?"ready":"caution")}</div>
-      <div class="actions">${[["source","Original framing"],["raw","Survey plane"],["regions","Regions"],...(tile.calibration?[["corrected","Neutral balance"]]:[])].filter(([key])=>canModes||key==="source").map(([key,label])=>btn(label,"viewer",state.viewer===key?"tiny primary":"tiny secondary",null,`data-value="${key}"`)).join("")}</div>
+      <div class="actions">${[["source","Original framing"],["raw","Survey plane"],["regions","Regions"],...(tile.calibration?[["corrected","Neutral balance"]]:[]),...(composite?[["seam","Seam map"]]:[])].filter(([key])=>canModes||key==="source").map(([key,label])=>btn(label,"viewer",state.viewer===key?"tiny primary":"tiny secondary",null,`data-value="${key}"`)).join("")}</div>
       <figure class="stage">${img(illustration,`${photo.role_label} · ${tile.name}`)}</figure>
       <p class="stage-foot">${photo.width} × ${photo.height} px · ${e(photo.working_color_space)}${tile.canvas_size&&canvas?` · Survey plane ${tile.canvas_size.join(" × ")} px`:""}</p>
+      ${composite?`<details><summary>Composite rule and coverage</summary><p class="soft">${e(composite.rule)}</p>
+        <div class="metrics">${stat("Left pixels",n(composite.stats.left_pixels,0))}${stat("Right pixels",n(composite.stats.right_pixels,0))}${stat("Holes",n(composite.stats.hole_pixels,0))}${stat("Lines kept whole",composite.stats.lines_kept_whole)}${stat("Lines crossed",composite.stats.lines_crossed)}</div>
+        ${table(["Side","Source scan","Sharp region"],composite.sources.map(item=>[item.side,item.name,item.region_name]))}</details>`:""}
       <div class="actions">${btn(photo.registration_state==="base"?"Mark survey corners":photo.registered_url?"Edit registration":"Register photo","geometry","secondary","frame")}
-      ${photo.registration_state!=="base"?btn("Set as base","geometry-base","secondary"):""}
+      ${photo.registration_state!=="base"&&!composite?btn("Set as base","geometry-base","secondary"):""}
       ${tile.photos.filter(item=>item.registered_url).length>1?btn("Compare registered views","compare","secondary","compare"):""}
+      ${tile.photos.filter(item=>item.registered_url&&!item.composite).length>1?btn("Build focus composite","composite-add","secondary","sample"):""}
       ${canModes?btn("Image quality","quality","secondary","plot"):""}${link("Download original",photo.original_url,"secondary","download")}</div>
     </section>`;
 }
@@ -365,7 +372,7 @@ function tileForm(existing) {
 }
 
 function captureForm(photo) {
-  const available=Object.entries(state.config.photo_roles).map(([key,label])=>option(key,label,photo?.role||"diffuse")).join("");
+  const available=Object.entries(state.config.photo_roles).filter(([key])=>key!=="composite").map(([key,label])=>option(key,label,photo?.role||"diffuse")).join("");
   modal(photo?"Edit capture":"Add a capture",`
     ${photo?"":field("Photo","photo",'<input id="field-photo" name="photo" type="file" accept="image/png,image/jpeg,image/tiff,image/webp,.tif,.tiff" required>')}
     ${selectField("Lighting role","role",available)}${areaField("Capture notes","note",photo?.note,500)}
@@ -394,16 +401,27 @@ function drawUpdate() {
   const artist=q("#draw-overlay");
   if (!artist) return;
   const coords=drawPoints.map(([x,y])=>[x*1000,y*1000]);
-  const edges=(drawLimit===2||coords.length<3)?"polyline":"polygon";
-  artist.innerHTML=`<${edges} class="draw-line" points="${coords.map(pair=>pair.join(",")).join(" ")}"></${edges}>
+  let shapes;
+  if (drawMode==="pairs") {
+    const segments=[];
+    for (let index=0;index+1<coords.length;index+=2) {
+      segments.push(`<line class="draw-line" x1="${coords[index][0]}" y1="${coords[index][1]}" x2="${coords[index+1][0]}" y2="${coords[index+1][1]}"/>`);
+    }
+    shapes=segments.join("");
+  } else {
+    const edges=(drawLimit===2||coords.length<3)?"polyline":"polygon";
+    shapes=`<${edges} class="draw-line" points="${coords.map(pair=>pair.join(",")).join(" ")}"></${edges}>`;
+  }
+  artist.innerHTML=`${shapes}
     ${coords.map(([x,y],index)=>`<circle class="draw-point" cx="${x}" cy="${y}" r="10"/><text class="draw-label" x="${x+16}" y="${y+16}">${index+1}</text>`).join("")}`;
   const label=q("#draw-count");
-  if (label) label.textContent=`${drawPoints.length} of ${drawLimit} points marked`;
+  if (label) label.textContent=drawMode==="pairs"?`${Math.floor(drawPoints.length/2)} of ${drawLimit/2} lines marked`:`${drawPoints.length} of ${drawLimit} points marked`;
 }
 
-function prepareDrawing(chosen, limit) {
+function prepareDrawing(chosen, limit, mode="polygon") {
   drawPoints=chosen.map(value=>[...value]);
   drawLimit=limit;
+  drawMode=mode;
   drawUpdate();
 }
 
@@ -511,6 +529,42 @@ function pairForm() {
       parent.innerHTML=`<figure class="stage">${img(uri,"Registered pair comparison")}</figure>
         <div class="metrics">${stat("Shared pixels",n(support.support_overlap_px,0))}${stat("Edges compared",n(support.edge_positions_compared,0))}</div>`;
     },true);
+}
+
+function compositeForm() {
+  const ready=state.tile.photos.filter(item=>item.registered_url&&!item.composite);
+  if (ready.length<2) throw Error("Register two original scans before building a focus composite.");
+  const areas=state.tile.regions.filter(item=>item.purpose!=="ignore");
+  if (areas.length<2) throw Error("Draw a sharp-area sampling region for each scan first.");
+  const base=state.tile.photos.find(item=>item.registration_state==="base");
+  modal("Build focus composite",`
+    <div class="form-columns">${selectField("First scan","first_photo_id",sources(ready,ready[0].id))}
+    ${selectField("Sharp area of first scan","first_region_id",areas.map(item=>option(item.id,item.name)).join(""))}
+    ${selectField("Second scan","second_photo_id",sources(ready,ready[1].id))}
+    ${selectField("Sharp area of second scan","second_region_id",areas.map(item=>option(item.id,item.name,areas[1]?.id)).join(""))}</div>
+    ${textField("Working image name (optional)","name","",'maxlength="80"')}
+    <p class="notice">Mark the fine lines both scans show in the overlap band: every two clicks make one line, up to 12 lines.
+    One top-to-bottom boundary keeps the most in-focus pixels, avoids the marked lines, and crosses a marked line only where both scans have real pixels.
+    Excluded (ignore) regions and missing coverage become holes. Building replaces any earlier working image.</p>
+    ${drawing(base.registered_url,"Specimen plane for tie-line marking")}
+    <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>`,
+    "Build working image",async data=>{
+      if (drawPoints.length%2) throw Error("Mark lines as pairs of endpoints; remove the stray point.");
+      const lines=[];
+      for (let index=0;index<drawPoints.length;index+=2) lines.push({start:drawPoints[index],end:drawPoints[index+1]});
+      const payload={...plainData(data),lines};
+      if (!payload.name) delete payload.name;
+      const updated=await api(tileUrl()+"/composites",{method:"POST",body:tileData(payload)});
+      state.tile=updated;
+      const summary=updated.composite_summary;
+      state.capture=summary.photo_id;
+      state.viewer="seam";
+      await gatherTile();
+      commitModal();
+      toast(`Working image saved: ${summary.left.name} left, ${summary.right.name} right · ${summary.lines_kept_whole} line(s) whole, ${summary.lines_crossed} crossed.`);
+      render();
+    },true);
+  prepareDrawing([],24,"pairs");
 }
 
 function geometryMeasurementForm(mode) {
@@ -689,6 +743,7 @@ async function doAction(name,target) {
       preview.innerHTML=`<figure class="stage">${img(uri,"Proposed rectified photo")}</figure><p class="soft">Visible support ${e(result.headers.get("X-Specimen-Support"))}%</p>`;
     },
     compare:pairForm,
+    "composite-add":compositeForm,
     quality:qualityForm,
     "region-add":()=>regionForm(),
     "region-edit":()=>regionForm(state.tile.regions.find(item=>item.id===id)),

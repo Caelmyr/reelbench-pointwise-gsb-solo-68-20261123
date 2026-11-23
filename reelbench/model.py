@@ -30,7 +30,9 @@ ROLE_LABELS = {
     "rake-left": "Raking light from left",
     "rake-right": "Raking light from right",
     "reference": "Reference capture",
+    "composite": "Focus composite",
 }
+DERIVED_ROLES = {"composite"}
 REGION_PURPOSES = {
     "inspection": "Inspection area",
     "bare": "Clear film base",
